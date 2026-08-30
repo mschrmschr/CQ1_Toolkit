@@ -20,6 +20,18 @@ For end-user instructions (which tool to pick, why "Channel names" is
 required, handling a plate with mixed staining, where output lands,
 troubleshooting), see [`USAGE.txt`](USAGE.txt).
 
+## Download
+
+No Python or build step needed to run the toolkit — grab the ready-to-run
+build from [Releases](https://github.com/mschrmschr/CQ1_Toolkit/releases):
+
+1. Download `CQ1_Toolkit_v1.0.0_win.zip` from the latest release
+2. Unzip anywhere (Desktop, Documents, a network share)
+3. Double-click `CQ1_Toolkit_Launcher.exe` and pick a tool
+
+This repository itself holds source only (see below) — the release zip is
+where the actual Windows executables live.
+
 ## Repository layout
 
 This repo holds **source only**. Each tool also has its own `build_exe.ps1`
