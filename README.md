@@ -18,8 +18,7 @@ pick a tool, no Python or admin rights needed on the machine running it.
 
 For end-user instructions (which tool to pick, why "Channel names" is
 required, handling a plate with mixed staining, where output lands,
-troubleshooting), see [`USAGE.txt`](USAGE.txt) — written for someone running
-the built toolkit who has never seen this code.
+troubleshooting), see [`USAGE.txt`](USAGE.txt).
 
 ## Repository layout
 
