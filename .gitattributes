@@ -1,0 +1,5 @@
+# Normalize line endings to LF in the repository itself, regardless of what
+# line ending the editor that touched a file last happened to use. Git still
+# checks files out with the native ending for whoever's working copy (CRLF on
+# Windows via core.autocrlf=true) -- this only fixes what's actually stored.
+* text=auto eol=lf
