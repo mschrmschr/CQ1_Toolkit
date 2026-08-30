@@ -1,0 +1,17 @@
+# PyInstaller build output -- rebuild from source instead of committing binaries
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor
+.vscode/
+.idea/
+
+# Real job configs (copy the .example.json files instead -- these can contain
+# real dataset paths that shouldn't be committed)
+jobs.json
+jobs_ome.json
+jobs.jsonc

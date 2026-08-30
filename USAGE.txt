@@ -1,0 +1,154 @@
+CQ1 Toolkit
+===========
+
+No install needed, no admin rights needed, no Python needed.
+
+1. Unzip this whole folder anywhere (Desktop, Documents, a network share).
+2. Double-click CQ1_Toolkit_Launcher.exe.
+3. Pick a tool:
+
+   - Field -> Stacks + MIP
+     Turns CQ1 field images into per-well OME-TIFF stacks, then makes
+     MIP overview images.
+
+   - Stitching + MIP
+     Stitches CQ1 tiled wholemount acquisitions into one image, then
+     makes MIP overview images.
+
+Each tool opens its own window with a "Browse..." button to pick your
+dataset folder (the folder containing MeasurementResult.ome.xml and an
+Image\ subfolder), an "Advanced options" toggle for tuning knobs, a Run
+button, and a log pane. When it finishes, "Open output folder" jumps
+straight to the results.
+
+Keep the folder structure intact (Launcher exe + tools\ subfolder next
+to each other) -- if you move the launcher out on its own, it won't be
+able to find the tools.
+
+If Windows SmartScreen or antivirus blocks the exe as "unrecognized
+publisher", that's expected for an unsigned internal tool -- click
+"More info" -> "Run anyway", or ask IT to allow it.
+
+
+Which tool do I want?
+=====================
+
+- Your CQ1 acquisition is a set of separate FIELDS (individual
+  positions, not stitched into one big image) -> use Field -> Stacks
+  + MIP. It turns each field into one proper multi-channel stack.
+
+- Your CQ1 acquisition is a WHOLEMOUNT / tiled scan that needs to be
+  stitched into one big image -> use Stitching + MIP. It stitches the
+  tiles together first, then does the same MIP step.
+
+Both tools point at the same kind of dataset folder: one that contains
+MeasurementResult.ome.xml (CQ1's own metadata export) and an Image\
+subfolder with the raw tile TIFFs.
+
+"MIP" = Maximum Intensity Projection: a single flattened image made by
+taking the brightest pixel at each position across all your Z-slices --
+a quick way to see your whole sample without scrolling through a stack.
+Both tools make one of these automatically after the main step.
+
+
+Channel names -- you must type these in yourself
+==================================================
+
+CQ1 does not give you real channel names (DAPI, GFP, etc.) anywhere --
+its own metadata only ever has generic labels like "CH1", "CH2". That's
+part of why this toolkit exists. Because of that, both tools REQUIRE
+you to type your channel names into the "Channel names" field before
+you can run -- leaving it blank gives an error rather than silently
+producing meaningless output.
+
+Rules that matter:
+- Type one name per channel, comma-separated, in the SAME ORDER your
+  channels were acquired in (channel 1 first, channel 2 second, ...).
+  Example: DAPI,GFP,RFP,FarRed
+- Get the order wrong and your images will still be produced, but every
+  channel will be labeled with the wrong stain -- there's no way for
+  the tool to catch this for you, since it has no way to know what you
+  actually stained with. If you're not sure of the order, check a
+  couple of raw images or ask whoever ran the acquisition.
+- This name gets written into the output file's own metadata (so it
+  shows up correctly if you reopen it in FIJI later), and it's also
+  what appears as the label on each panel of the MIP overview image.
+
+
+Different wells stained differently? Use "Only well"
+=======================================================
+
+CQ1 plates can have different wells stained with completely different
+things -- e.g. well W1 is DAPI/GFP/RFP but well W2 is a different panel
+entirely. Since "Channel names" is one setting for the whole run, you
+can't mix stainings in a single click of "Run".
+
+Instead, open "Advanced options" and use the "Only well" field to run
+the tool once per staining group:
+
+1. Set "Only well" to the well you want (a number, e.g. 1 for well W1),
+   set "Channel names" to match that well's actual staining, click Run.
+2. Change "Only well" to the next well, change "Channel names" to match
+   ITS staining, click Run again -- into the SAME output folder.
+
+This is safe to repeat: output filenames already include the well
+number, so different wells' runs never overwrite each other, and the
+MIP step is automatically scoped to just the well you're running so an
+earlier well's overview image never gets relabeled by a later run's
+channel names.
+
+(Field -> Stacks + MIP has the same "Only well" field, under Advanced
+options -> Assembly options; it's only useful there together with
+"Split by well within field" turned on, since that's what makes the
+tool tell wells apart in the first place -- it's on by default.)
+
+There's also an "Only grid" / "Only grid index" field for the
+Stitching tool -- that's for when a single well itself contains more
+than one separate tiled region (e.g. two tissue pieces mounted in the
+same well, scanned as two grids). Same idea, different axis: leave
+blank to process every grid, or set it to isolate one.
+
+
+Where to find your results
+===========================
+
+Field -> Stacks + MIP writes into your dataset folder by default:
+  Stacks\        one OME-TIFF per field (or per field+well)
+  MIP\           MIP overview images (panel PNGs, one per stack)
+
+Stitching + MIP writes into your dataset folder by default:
+  stitched_output\        one stitched OME-TIFF per (well, grid)
+  stitched_output\mip\    MIP overview panel PNGs, one per stitched file
+
+The stitched/stacked .ome.tif files are the real data -- open those in
+FIJI (File -> Import -> Bio-Formats) for anything quantitative. The MIP
+panel PNGs are a quick-look overview only, for eyeballing that a run
+looks right, not for measurements.
+
+
+Troubleshooting
+================
+
+"Invalid input" popup right when you click Run -- a field didn't pass a
+basic check before anything ran (most commonly: "Channel names are
+required", or a dataset folder wasn't chosen). Fix that field and click
+Run again -- nothing was written yet.
+
+"Job failed - see the log for details" popup after Run -- something
+went wrong partway through. Scroll the log pane for the actual error;
+common causes are the dataset folder not having the expected
+MeasurementResult.ome.xml / Image\ layout, or the channel count you
+typed not matching what's actually in the data. Note that "Open output
+folder" becomes clickable once a run finishes either way, success or
+failure (the output folder itself gets created up front) -- it being
+enabled doesn't by itself mean the run produced anything useful, always
+check the log pane too.
+
+"Tool not found" when clicking a button -- someone moved the launcher
+exe out of the CQ1_Toolkit folder, away from tools\. Put it back next
+to tools\, or re-unzip a fresh copy.
+
+Window takes 10-20 seconds to open -- normal for these tools; they're
+self-contained apps with no separate install step, which trades a
+slower first launch for not needing Python or admin rights. Don't
+double-click the button again while waiting.

@@ -1,0 +1,23 @@
+{
+  "mip_defaults": {
+    "channel_colors": ["#0000FF", "#FF00FF", "#00FFFF", "#FFB000"],
+    "projection": "max",
+    "norm": { "p_low": 2.0, "p_high": 99.8, "clip": true },
+    "save": { "fmt": "png", "dpi": 300, "panel": true, "zstack_panel": true, "panel_cols": 4 },
+    "parallel": false,
+    "workers": 4
+  },
+  "jobs": [
+    {
+      "base_path": "C:\\path\\to\\your\\CQ1_dataset_folder",
+      "channels": ["C1", "C2", "C3", "C4"],
+      "channel_names": ["DAPI", "GFP", "RFP", "FarRed"],
+      "field_start": 1,
+      "field_strategy": "intersection",
+      "enforce_equal_z": true,
+      "dtype": "uint16",
+      "split_by_w_within_field": true,
+      "generate_mip": true
+    }
+  ]
+}

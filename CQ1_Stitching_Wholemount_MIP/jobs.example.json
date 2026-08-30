@@ -1,0 +1,49 @@
+[
+  {
+    "root_dir": "C:\\path\\to\\your\\CQ1_dataset_folder",
+    "xml_file": "MeasurementResult.ome.xml",
+    "image_dir": "Image",
+    "meta_csv": "image_metadata_with_stage_and_grid.csv",
+
+    "output_dir": "stitched_output",
+
+    "stitch_backend": "seamless",
+    "placement": "stage",
+    "only_well": null,
+    "only_grid": null,
+    "only_z": null,
+    "dry_run": false,
+    "channel_names": ["DAPI", "GFP", "RFP", "FarRed"],
+
+    "overlap_fraction": 0.01,
+    "compression": "zlib",
+    "compression_level": 6,
+    "predictor": true,
+    "tile": [512, 512],
+    "bigtiff": true,
+    "pyramids": false,
+
+    "min_feather_px": 6,
+    "max_feather_px": 32,
+    "lattice_snap_px": 0,
+    "snap_axis": "both",
+
+    "refine_alignment": false,
+    "refine_max_shift_px": 6,
+    "refine_axis": "both",
+
+    "overlap_gain_match": false,
+    "gain_clip_low": 0.92,
+    "gain_clip_high": 1.08,
+    "gain_match_channels": null,
+
+    "mip": {
+      "output_dir": "mip",
+      "projection": "max",
+      "z_range": null,
+      "preprocess": { "gain_match": false },
+      "norm": { "p_low": 2.0, "p_high": 99.8, "clip": true },
+      "channel_names": null
+    }
+  }
+]

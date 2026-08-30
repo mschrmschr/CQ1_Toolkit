@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CQ1 FieldToStacks jobs config",
+  "type": "object",
+  "properties": {
+    "mip_defaults": {
+      "type": "object",
+      "properties": {
+        "channel_colors": {
+          "type": "array",
+          "items": { "type": "string", "format": "color-hex" }
+        }
+      }
+    },
+    "jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "channel_colors": {
+            "type": "array",
+            "items": { "type": "string", "format": "color-hex" }
+          }
+        }
+      }
+    }
+  }
+}
