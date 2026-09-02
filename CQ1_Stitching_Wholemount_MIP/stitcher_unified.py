@@ -207,6 +207,49 @@ def _writer_kwargs(compression: Optional[str], compression_level: int, predictor
     return kwargs
 
 
+def _tile_chunks(planes, tile: Optional[Tuple[int, int]], height: int, width: int):
+    """Re-chunk a per-plane iterator into the per-tile iterator tifffile's
+    `imwrite()`/`TiffWriter.write()` actually require when both `data` is an
+    iterator *and* `tile=` is set.
+
+    This is easy to miss: the docstring says "If `tile` is specified,
+    iterator items must match the tile shape" -- passing whole (H,W) planes
+    instead (as this module briefly did) works fine for small test mosaics
+    that happen to be smaller than one tile, but silently breaks on any real
+    mosaic spanning multiple tiles: `TiffWriter.write()` computes the total
+    chunk count as `tiles_per_plane * num_planes` and pulls exactly that many
+    items from the iterator via `next()`, one per *tile*, not one per
+    *plane* -- so a plane-per-item generator runs out early and tifffile's
+    internal encoder raises `RuntimeError: generator raised StopIteration`
+    once every plane has been consumed but more tile-sized chunks are still
+    expected. Reproduced directly against installed tifffile (2025.5.10) at
+    production scale (3789x3789 mosaic, 512x512 tile, 205 planes) before
+    landing this fix.
+
+    Chunks are yielded page-major (matching plane order), then tile-row-major
+    within each page -- the same traversal tifffile's own `iter_tiles()` uses
+    for a materialized array, verified against it directly. Partial edge
+    tiles are yielded un-padded (smaller than tile shape); tifffile's own
+    `encode_chunks()` zero-pads them the same way it pads a materialized
+    array's edge tiles, so there's no need to pad here too.
+    """
+    if not tile:
+        for plane in planes:
+            yield plane
+        return
+    th, tw = tile
+    n_ty = (height + th - 1) // th
+    n_tx = (width + tw - 1) // tw
+    for plane in planes:
+        for ty in range(n_ty):
+            y0 = ty * th
+            y1 = min(y0 + th, height)
+            for tx in range(n_tx):
+                x0 = tx * tw
+                x1 = min(x0 + tw, width)
+                yield plane[y0:y1, x0:x1]
+
+
 def _mosaic_extent(g: pd.DataFrame, tw: int, th: int, placement: str) -> Tuple[str, str, str, int, int, int, int]:
     """Return (xcol, ycol, mode, x_min, y_min, max_x, max_y) for tile placement."""
     use_grid = (placement == "grid") and {"PixelX_grid", "PixelY_grid"}.issubset(g.columns)
@@ -258,29 +301,36 @@ def stitch_grid_classic(
 
     z_slices = sorted(g["Z"].unique())
     channels = sorted(g["C"].unique())
-    out = np.zeros((len(z_slices), len(channels), max_y, max_x), dtype=dtype)
+    out_shape = (len(z_slices), len(channels), max_y, max_x)
 
     total = len(z_slices) * len(channels)
     progress = tqdm(total=total, desc=f"Placing tiles {well_id} G{grid_index}", unit="plane")
-    for zi, z in enumerate(z_slices):
-        for ci, c in enumerate(channels):
-            zc = _order_df(g[(g["Z"] == z) & (g["C"] == c)].copy())
-            plane = out[zi, ci]
-            for _, row in zc.iterrows():
-                pth = _resolve_tile_path(row["TiffFile"], image_root)
-                if not os.path.exists(pth):
-                    print(f"[warn] missing: {pth}")
-                    continue
-                img = imread(pth)
-                px = int(np.round(float(row[xcol]) - (0 if mode == "grid" else x_min)))
-                py = int(np.round(float(row[ycol]) - (0 if mode == "grid" else y_min)))
-                H, W = plane.shape
-                x0 = max(px, 0); y0 = max(py, 0); x1 = min(px + tw, W); y1 = min(py + th, H)
-                if x1 > x0 and y1 > y0:
-                    tx0 = x0 - px; ty0 = y0 - py; tx1 = tx0 + (x1 - x0); ty1 = ty0 + (y1 - y0)
-                    plane[y0:y1, x0:x1] = img[ty0:ty1, tx0:tx1]
-            progress.update(1)
-    progress.close()
+
+    # Stream one (Z,C) plane at a time instead of materializing the whole
+    # mosaic in RAM: a full Z*C*H*W array easily exceeds available memory on
+    # a large wholemount grid (e.g. 5.09 GiB for a 5x4x8371x16336 uint16
+    # mosaic crashed with MemoryError), while each plane only needs to exist
+    # long enough to be written out.
+    def _planes():
+        for z in z_slices:
+            for c in channels:
+                zc = _order_df(g[(g["Z"] == z) & (g["C"] == c)].copy())
+                plane = np.zeros((max_y, max_x), dtype=dtype)
+                for _, row in zc.iterrows():
+                    pth = _resolve_tile_path(row["TiffFile"], image_root)
+                    if not os.path.exists(pth):
+                        print(f"[warn] missing: {pth}")
+                        continue
+                    img = imread(pth)
+                    px = int(np.round(float(row[xcol]) - (0 if mode == "grid" else x_min)))
+                    py = int(np.round(float(row[ycol]) - (0 if mode == "grid" else y_min)))
+                    H, W = plane.shape
+                    x0 = max(px, 0); y0 = max(py, 0); x1 = min(px + tw, W); y1 = min(py + th, H)
+                    if x1 > x0 and y1 > y0:
+                        tx0 = x0 - px; ty0 = y0 - py; tx1 = tx0 + (x1 - x0); ty1 = ty0 + (y1 - y0)
+                        plane[y0:y1, x0:x1] = img[ty0:ty1, tx0:tx1]
+                progress.update(1)
+                yield plane
 
     try:
         ch_names = list(g.sort_values("C")["ChannelName"].unique())
@@ -289,9 +339,12 @@ def stitch_grid_classic(
 
     metadata = {"axes": "ZCYX", "PhysicalSizeX": psx, "PhysicalSizeY": psy, "PhysicalSizeZ": psz,
                 "Channel": {"Name": ch_names}}
-    imwrite(output_path, out, metadata=metadata,
-            **_writer_kwargs(compression, compression_level, predictor, tile, bigtiff, pyramids))
-    print(f" Saved: {output_path}  Shape: {out.shape} (Z,C,Y,X)  total={time.perf_counter() - t0:.2f}s")
+    try:
+        imwrite(output_path, _tile_chunks(_planes(), tile, max_y, max_x), shape=out_shape, dtype=dtype, metadata=metadata,
+                **_writer_kwargs(compression, compression_level, predictor, tile, bigtiff, pyramids))
+    finally:
+        progress.close()
+    print(f" Saved: {output_path}  Shape: {out_shape} (Z,C,Y,X)  total={time.perf_counter() - t0:.2f}s")
 
 
 # ---------------------------- seamless -----------------------------------------
@@ -378,67 +431,74 @@ def stitch_grid_seamless(
 
     z_slices = sorted(g["Z"].unique())
     channels = sorted(g["C"].unique())
-    out = np.zeros((len(z_slices), len(channels), max_y, max_x), dtype=dtype)
+    out_shape = (len(z_slices), len(channels), max_y, max_x)
 
     total = len(z_slices) * len(channels)
     progress = tqdm(total=total, desc=f"Blending planes {well_id} G{grid_index}", unit="plane")
 
-    for zi, z in enumerate(z_slices):
-        for ci, c in enumerate(channels):
-            zc = _order_df(g[(g["Z"] == z) & (g["C"] == c)].copy())
-            plane = out[zi, ci]
-            try:
-                ch_name = zc["ChannelName"].iloc[0]
-            except Exception:
-                ch_name = None
+    # Stream one (Z,C) plane at a time instead of materializing the whole
+    # mosaic in RAM: a full Z*C*H*W array easily exceeds available memory on
+    # a large wholemount grid (e.g. 5.09 GiB for a 5x4x8371x16336 uint16
+    # mosaic crashed with MemoryError), while each plane only needs to exist
+    # long enough to be written out. Blending only ever reads/writes within
+    # the current plane, so this is a pure memory optimization.
+    def _planes():
+        for z in z_slices:
+            for c in channels:
+                zc = _order_df(g[(g["Z"] == z) & (g["C"] == c)].copy())
+                plane = np.zeros((max_y, max_x), dtype=dtype)
+                try:
+                    ch_name = zc["ChannelName"].iloc[0]
+                except Exception:
+                    ch_name = None
 
-            for _, row in zc.iterrows():
-                pth = _resolve_tile_path(row["TiffFile"], image_root)
-                if not os.path.exists(pth):
-                    print(f"[warn] missing: {pth}")
-                    continue
-                img = imread(pth)
+                for _, row in zc.iterrows():
+                    pth = _resolve_tile_path(row["TiffFile"], image_root)
+                    if not os.path.exists(pth):
+                        print(f"[warn] missing: {pth}")
+                        continue
+                    img = imread(pth)
 
-                px = int(np.round(float(row[xcol]) - (0 if mode == "grid" else x_min)))
-                py = int(np.round(float(row[ycol]) - (0 if mode == "grid" else y_min)))
+                    px = int(np.round(float(row[xcol]) - (0 if mode == "grid" else x_min)))
+                    py = int(np.round(float(row[ycol]) - (0 if mode == "grid" else y_min)))
 
-                dx = dy = 0
-                if refine_alignment and refine_max_shift_px > 0:
-                    H, W = img.shape
-                    mos_view = plane[max(py - ovy, 0):py + min(ovy, H), max(px - ovx, 0):px + min(ovx, W)]
-                    tile_view = img[:mos_view.shape[0], :mos_view.shape[1]] if mos_view.size else None
-                    if tile_view is not None and mos_view.shape == tile_view.shape:
-                        dx, dy = _refine_from_overlap(mos_view, tile_view, ovx, ovy, refine_max_shift_px, axis=refine_axis)
+                    dx = dy = 0
+                    if refine_alignment and refine_max_shift_px > 0:
+                        H, W = img.shape
+                        mos_view = plane[max(py - ovy, 0):py + min(ovy, H), max(px - ovx, 0):px + min(ovx, W)]
+                        tile_view = img[:mos_view.shape[0], :mos_view.shape[1]] if mos_view.size else None
+                        if tile_view is not None and mos_view.shape == tile_view.shape:
+                            dx, dy = _refine_from_overlap(mos_view, tile_view, ovx, ovy, refine_max_shift_px, axis=refine_axis)
 
-                if overlap_gain_match and _channel_matches(c, ch_name, gain_match_channels):
-                    def _q95(a):
-                        a = a.astype(np.float32)
-                        return float(np.percentile(a, 95.0)) if a.size > 0 else 0.0
-                    scales = []
-                    if ovx > 0 and px > 0:
-                        lx0 = max(px - ovx, 0); lw = min(ovx, img.shape[1], plane.shape[1] - lx0)
-                        if lw > 4:
-                            A = plane[py:py + img.shape[0], lx0:lx0 + lw]
-                            B = img[:, :lw]
-                            qA, qB = _q95(A), _q95(B)
-                            if qA > 0 and qB > 0:
-                                scales.append(qA / qB)
-                    if ovy > 0 and py > 0:
-                        ty0 = max(py - ovy, 0); oh = min(ovy, img.shape[0], plane.shape[0] - ty0)
-                        if oh > 4:
-                            A = plane[ty0:ty0 + oh, px:px + img.shape[1]]
-                            B = img[:oh, :]
-                            qA, qB = _q95(A), _q95(B)
-                            if qA > 0 and qB > 0:
-                                scales.append(qA / qB)
-                    if scales:
-                        s = float(np.clip(float(np.median(scales)), gain_clip_low, gain_clip_high))
-                        img = (img.astype(np.float32) * s).astype(img.dtype)
+                    if overlap_gain_match and _channel_matches(c, ch_name, gain_match_channels):
+                        def _q95(a):
+                            a = a.astype(np.float32)
+                            return float(np.percentile(a, 95.0)) if a.size > 0 else 0.0
+                        scales = []
+                        if ovx > 0 and px > 0:
+                            lx0 = max(px - ovx, 0); lw = min(ovx, img.shape[1], plane.shape[1] - lx0)
+                            if lw > 4:
+                                A = plane[py:py + img.shape[0], lx0:lx0 + lw]
+                                B = img[:, :lw]
+                                qA, qB = _q95(A), _q95(B)
+                                if qA > 0 and qB > 0:
+                                    scales.append(qA / qB)
+                        if ovy > 0 and py > 0:
+                            ty0 = max(py - ovy, 0); oh = min(ovy, img.shape[0], plane.shape[0] - ty0)
+                            if oh > 4:
+                                A = plane[ty0:ty0 + oh, px:px + img.shape[1]]
+                                B = img[:oh, :]
+                                qA, qB = _q95(A), _q95(B)
+                                if qA > 0 and qB > 0:
+                                    scales.append(qA / qB)
+                        if scales:
+                            s = float(np.clip(float(np.median(scales)), gain_clip_low, gain_clip_high))
+                            img = (img.astype(np.float32) * s).astype(img.dtype)
 
-                _blend_into(plane, img, px + dx, py + dy, tx, ty)
+                    _blend_into(plane, img, px + dx, py + dy, tx, ty)
 
-            progress.update(1)
-    progress.close()
+                progress.update(1)
+                yield plane
 
     try:
         ch_names = list(g.sort_values("C")["ChannelName"].unique())
@@ -447,9 +507,12 @@ def stitch_grid_seamless(
 
     metadata = {"axes": "ZCYX", "PhysicalSizeX": psx, "PhysicalSizeY": psy, "PhysicalSizeZ": psz,
                 "Channel": {"Name": ch_names}}
-    imwrite(output_path, out, metadata=metadata,
-            **_writer_kwargs(compression, compression_level, predictor, tile, bigtiff, pyramids))
-    print(f" Saved blended OME-TIFF: {output_path}  Shape: {out.shape} (Z,C,Y,X)  total={time.perf_counter() - t0:.2f}s")
+    try:
+        imwrite(output_path, _tile_chunks(_planes(), tile, max_y, max_x), shape=out_shape, dtype=dtype, metadata=metadata,
+                **_writer_kwargs(compression, compression_level, predictor, tile, bigtiff, pyramids))
+    finally:
+        progress.close()
+    print(f" Saved blended OME-TIFF: {output_path}  Shape: {out_shape} (Z,C,Y,X)  total={time.perf_counter() - t0:.2f}s")
 
 
 # ---------------------------- tiny overlap --------------------------------------
@@ -507,35 +570,41 @@ def stitch_grid_tinyoverlap(
 
     z_slices = sorted(g["Z"].unique())
     channels = sorted(g["C"].unique())
-    out = np.zeros((len(z_slices), len(channels), max_y, max_x), dtype=dtype)
+    out_shape = (len(z_slices), len(channels), max_y, max_x)
 
     total = len(z_slices) * len(channels)
     progress = tqdm(total=total, desc=f"Blending planes {well_id} G{grid_index}", unit="plane")
 
-    for zi, z in enumerate(z_slices):
-        for ci, c in enumerate(channels):
-            zc = _order_df(g[(g["Z"] == z) & (g["C"] == c)].copy())
-            plane = out[zi, ci]
+    # Stream one (Z,C) plane at a time instead of materializing the whole
+    # mosaic in RAM: a full Z*C*H*W array easily exceeds available memory on
+    # a large wholemount grid (e.g. 5.09 GiB for a 5x4x8371x16336 uint16
+    # mosaic crashed with MemoryError), while each plane only needs to exist
+    # long enough to be written out.
+    def _planes():
+        for z in z_slices:
+            for c in channels:
+                zc = _order_df(g[(g["Z"] == z) & (g["C"] == c)].copy())
+                plane = np.zeros((max_y, max_x), dtype=dtype)
 
-            meds = []; paths = []; xs = []; ys = []
-            for _, row in zc.iterrows():
-                pth = _resolve_tile_path(row["TiffFile"], image_root)
-                arr = imread(pth)
-                meds.append(float(np.median(arr)))
-                paths.append(pth)
-                px = int(np.round(float(row[xcol]) - (0 if mode == "grid" else x_min)))
-                py = int(np.round(float(row[ycol]) - (0 if mode == "grid" else y_min)))
-                xs.append(px); ys.append(py)
+                meds = []; paths = []; xs = []; ys = []
+                for _, row in zc.iterrows():
+                    pth = _resolve_tile_path(row["TiffFile"], image_root)
+                    arr = imread(pth)
+                    meds.append(float(np.median(arr)))
+                    paths.append(pth)
+                    px = int(np.round(float(row[xcol]) - (0 if mode == "grid" else x_min)))
+                    py = int(np.round(float(row[ycol]) - (0 if mode == "grid" else y_min)))
+                    xs.append(px); ys.append(py)
 
-            target = float(np.median(meds)) if meds else 0.0
-            for med, pth, px, py in zip(meds, paths, xs, ys):
-                img = imread(pth)
-                gain = 1.0 if med == 0 else (target / float(med))
-                img_corr = (img.astype(np.float32) * float(gain)).astype(img.dtype)
-                _blend_into(plane, img_corr, px, py, tx, ty)
+                target = float(np.median(meds)) if meds else 0.0
+                for med, pth, px, py in zip(meds, paths, xs, ys):
+                    img = imread(pth)
+                    gain = 1.0 if med == 0 else (target / float(med))
+                    img_corr = (img.astype(np.float32) * float(gain)).astype(img.dtype)
+                    _blend_into(plane, img_corr, px, py, tx, ty)
 
-            progress.update(1)
-    progress.close()
+                progress.update(1)
+                yield plane
 
     try:
         ch_names = list(g.sort_values("C")["ChannelName"].unique())
@@ -544,6 +613,9 @@ def stitch_grid_tinyoverlap(
 
     metadata = {"axes": "ZCYX", "PhysicalSizeX": psx, "PhysicalSizeY": psy, "PhysicalSizeZ": psz,
                 "Channel": {"Name": ch_names}}
-    imwrite(output_path, out, metadata=metadata,
-            **_writer_kwargs(compression, compression_level, predictor, tile, bigtiff, pyramids))
-    print(f" Saved: {output_path}  Shape: {out.shape} (Z,C,Y,X)  total={time.perf_counter() - t0:.2f}s")
+    try:
+        imwrite(output_path, _tile_chunks(_planes(), tile, max_y, max_x), shape=out_shape, dtype=dtype, metadata=metadata,
+                **_writer_kwargs(compression, compression_level, predictor, tile, bigtiff, pyramids))
+    finally:
+        progress.close()
+    print(f" Saved: {output_path}  Shape: {out_shape} (Z,C,Y,X)  total={time.perf_counter() - t0:.2f}s")

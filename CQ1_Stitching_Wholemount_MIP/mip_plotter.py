@@ -89,6 +89,94 @@ def _read_stack_to_ZCYX(path: str) -> Tuple[np.ndarray, List[str]]:
 # Processing
 # --------------------------
 
+def _project_stack_streaming(
+    path: str, z_range: Optional[Sequence[int]], projection: str,
+) -> Optional[Tuple[np.ndarray, List[str]]]:
+    """Compute the same result as
+    `_projection(_apply_z_range(_read_stack_to_ZCYX(path)[0], z_range), projection)`
+    but page-by-page, without ever materializing the full (Z,C,Y,X) array.
+
+    Reading a whole stitched wholemount into RAM just to max-project it back
+    down to (C,Y,X) is what OOM'd here at the ~5 GiB scale (same class of bug
+    as the stitcher's own full-mosaic allocation) -- this only ever holds one
+    (C,Y,X)-sized accumulator plus one (Y,X) page at a time.
+
+    Returns None (caller should fall back to the whole-array path) for any
+    layout this fast path doesn't confidently handle -- RGB/multi-sample
+    pages, a page count that doesn't match the declared non-Y/X shape, or a
+    'T' axis with size >1 (same restriction `_reorder_to_ZCYX` enforces).
+    """
+    projection = (projection or "max").lower()
+    if projection not in ("max", "mean"):
+        raise ValueError("projection must be 'max' or 'mean'")
+
+    with tifffile.TiffFile(path) as tif:
+        series = tif.series[0]
+        pages = series.pages
+        axes = list(series.axes.upper())
+        shape = list(series.shape)
+
+        if series.keyframe.samplesperpixel != 1:
+            return None  # RGB/multi-sample - let the whole-array path handle it
+        if "Y" not in axes or "X" not in axes or "C" not in axes:
+            return None
+        flat_axes = [a for a in axes if a not in ("Y", "X")]
+        flat_shape = [shape[axes.index(a)] for a in flat_axes]
+        if int(np.prod(flat_shape, dtype=np.int64)) != len(pages):
+            return None  # pyramidal/nested series etc. - not the simple layout we assume
+        if "T" in flat_axes and flat_shape[flat_axes.index("T")] != 1:
+            return None  # matches _reorder_to_ZCYX's own restriction
+
+        z_pos = flat_axes.index("Z") if "Z" in flat_axes else None
+        c_pos = flat_axes.index("C")
+        nz = flat_shape[z_pos] if z_pos is not None else 1
+        nc = flat_shape[c_pos]
+        h, w = shape[axes.index("Y")], shape[axes.index("X")]
+
+        z0, z1 = (None, None) if not z_range else (z_range[0], z_range[1])
+        z0 = 0 if z0 is None else int(z0)
+        z1 = nz if (z1 is None or z1 <= 0) else int(z1)
+        z0 = max(0, min(z0, nz))
+        z1 = max(z0 + 1, min(z1, nz))
+
+        dtype = series.dtype
+        if projection == "max":
+            acc = np.zeros((nc, h, w), dtype=dtype)
+        else:
+            acc = np.zeros((nc, h, w), dtype=np.float64)
+
+        for p_idx, page in enumerate(pages):
+            idx = np.unravel_index(p_idx, flat_shape) if len(flat_shape) > 1 else (p_idx,)
+            z = idx[z_pos] if z_pos is not None else 0
+            if z < z0 or z >= z1:
+                continue
+            c = idx[c_pos]
+            data = page.asarray()
+            if projection == "max":
+                np.maximum(acc[c], data, out=acc[c])
+            else:
+                acc[c] += data
+
+        if projection == "mean":
+            acc = (acc / max(z1 - z0, 1)).astype(np.float64)
+
+        ch_names = None
+        ome_xml = getattr(tif, "ome_metadata", None)
+        if ome_xml:
+            try:
+                from ome_types import from_xml  # optional dependency
+                ome = from_xml(ome_xml)
+                im = ome.images[0]
+                ch_names = [ch.name or f"Channel{i}" for i, ch in enumerate(im.pixels.channels)]
+            except Exception as e:
+                print(f"[warn] Failed parsing OME metadata: {e}")
+
+    if ch_names is None or len(ch_names) != nc:
+        ch_names = [f"Channel{i}" for i in range(nc)]
+
+    return acc, ch_names
+
+
 def _apply_z_range(zcyx: np.ndarray, z_range: Optional[Sequence[int]]) -> np.ndarray:
     if not z_range:
         return zcyx
@@ -259,12 +347,17 @@ def run_mip_job(job: Any) -> Dict[str, Any]:
         base = f.stem.replace(".ome", "")
         print(f"-> {base}")
         try:
-            zcyx, ch_names = _read_stack_to_ZCYX(str(f))
-            if channel_names and len(channel_names) == zcyx.shape[1]:
+            streamed = _project_stack_streaming(str(f), z_range, projection)
+            if streamed is not None:
+                cyx, ch_names = streamed
+            else:
+                zcyx, ch_names = _read_stack_to_ZCYX(str(f))
+                zcyx = _apply_z_range(zcyx, z_range)
+                cyx = _projection(zcyx, projection)
+
+            if channel_names and len(channel_names) == cyx.shape[0]:
                 ch_names = list(channel_names)
 
-            zcyx = _apply_z_range(zcyx, z_range)
-            cyx = _projection(zcyx, projection)
             cyx = _percentile_normalize(cyx, norm.get("p_low", 2.0), norm.get("p_high", 99.8), norm.get("clip", True))
 
             if preprocess.get("gain_match"):
