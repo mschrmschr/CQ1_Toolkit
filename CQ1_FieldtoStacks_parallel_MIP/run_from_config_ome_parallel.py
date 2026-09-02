@@ -16,7 +16,13 @@ plus optional ``mip_defaults``. For each job it:
 Failures in one job (assembly or MIP generation) are caught, logged, and
 skipped so the remaining jobs in the batch still run.
 
-Usage: ``python run_from_config_ome_parallel.py [--config path/to/jobs.json] [--no-mip]``
+Resuming a crashed run: each field/well stack is written atomically and
+skipped on a later run if its output file already exists, so simply
+re-running the same command picks up where a crashed/killed run left off
+(see `JobConfig.overwrite`). Pass ``--overwrite`` (or set ``"overwrite":
+true`` on a job) to force a full rewrite instead.
+
+Usage: ``python run_from_config_ome_parallel.py [--config path/to/jobs.json] [--no-mip] [--overwrite]``
 (defaults to ``jobs_ome.json`` next to this script).
 """
 
@@ -123,6 +129,7 @@ def _validate_job(d: Dict[str, Any]) -> JobConfig:
         dtype=str(d["dtype"]) if d.get("dtype") is not None else None,
         split_by_w_within_field=bool(d.get("split_by_w_within_field", False)),
         only_well=int(d["only_well"]) if d.get("only_well") is not None else None,
+        overwrite=bool(d.get("overwrite", False)),
     )
 
 def _default_mip_output_dir(raw_job: Dict[str, Any], job_cfg: JobConfig) -> str:
@@ -182,6 +189,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Assemble OME-TIFF stacks from OME-XML using a JSON config.")
     parser.add_argument("--config", type=Path, default=default_config)
     parser.add_argument("--no-mip", action="store_true", help="Skip automatic MIP generation for all jobs.")
+    parser.add_argument("--overwrite", action="store_true",
+                         help="Rewrite every field/well stack even if its output file already exists "
+                              "(default: skip existing outputs and resume from where a crashed/killed run left off).")
     args = parser.parse_args()
 
     _lower_process_priority()
@@ -196,6 +206,8 @@ def main() -> None:
         print(f"\n=== Job {idx}/{len(jobs)} ===")
         j = _inject_paths(j)
         job_cfg = _validate_job(j)
+        if args.overwrite:
+            job_cfg.overwrite = True
         try:
             outputs = assemble_one_job(job_cfg)
             print(f"🧾 Wrote {len(outputs)} file(s).")

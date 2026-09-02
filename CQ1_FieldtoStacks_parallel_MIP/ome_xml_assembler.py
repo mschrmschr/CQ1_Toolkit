@@ -74,6 +74,14 @@ class JobConfig:
             set to match, into the same `save_dir` -- output filenames
             already include the well number, so repeated runs don't
             collide.
+        overwrite: If False (default), a field/well whose output OME-TIFF
+            already exists in `save_dir` is skipped (its source Z-planes are
+            never re-read) instead of being rewritten -- lets a crashed/killed
+            run be resumed by simply re-launching the same job. Outputs are
+            written atomically (temp file + rename) so a file only exists
+            once it's complete; a crash mid-write can't leave a corrupt file
+            that gets mistaken for "already done". Set True to force a full
+            rewrite of every field/well.
     """
 
     ome_xml_path: str
@@ -93,6 +101,7 @@ class JobConfig:
     # In flat mode: write per Well inside each Field (and also in FieldXXXX mode)
     split_by_w_within_field: bool = False
     only_well: Optional[int] = None
+    overwrite: bool = False
 
 
 # ----------------------------
@@ -478,7 +487,16 @@ def _write_stack_for_group(
     image_name: str,
     out_path: str,
 ) -> List[str]:
-    """Writes one OME-TIFF for the provided [paths per channel]."""
+    """Writes one OME-TIFF for the provided [paths per channel].
+
+    Skips the (expensive) read/write entirely if `out_path` already exists
+    and `cfg.overwrite` is False -- see `JobConfig.overwrite` for the resume
+    behavior this enables.
+    """
+    if os.path.exists(out_path) and not cfg.overwrite:
+        print(f"⏭️  Skipping existing: {out_path}")
+        return [out_path]
+
     channel_stacks: List[np.ndarray] = []
     z_count: Optional[int] = None
 
@@ -516,10 +534,17 @@ def _write_stack_for_group(
     # passing a hand-built `description`: tifffile forces ome=False whenever a `description`
     # is given, so any manually assembled OME-XML would be silently discarded and replaced
     # with a generic "shaped" description that Bio-Formats/Fiji cannot build a hyperstack from.
+    # Write to a temp file first and rename into place once complete, so a
+    # crash mid-write never leaves a partial file at `out_path` that a later
+    # resume run would mistake for "already done".
+    tmp_path = out_path + ".part"
     imwrite(
-        out_path,
+        tmp_path,
         combined,
         photometric="minisblack",
+        ome=True,  # tifffile normally infers this from the ".ome.tif" filename suffix,
+                   # which the ".part" temp name doesn't have -- force it so Bio-Formats/Fiji
+                   # gets real OME-XML instead of tifffile's fallback "shaped" JSON metadata.
         metadata={
             "axes": "ZCYX",
             "Name": image_name,
@@ -529,5 +554,6 @@ def _write_stack_for_group(
             "Channel": {"Name": channel_names},
         },
     )
+    os.replace(tmp_path, out_path)
     print(f"✅ Saved: {out_path}")
     return [out_path]
