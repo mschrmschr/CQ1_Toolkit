@@ -1,36 +1,50 @@
-# CQ1 Toolkit
+# Yokogawa CQ1 Image Processing Toolkit
 
-Two standalone Windows tools for processing Yokogawa CQ1 microscope
-acquisitions, packaged behind one "Fiji-style" launcher: unzip, double-click,
-pick a tool, no Python or admin rights needed on the machine running it.
+Two Windows tools for processing images from a Yokogawa CQ1 microscope —
+no Python, no coding, no admin rights needed to run them.
 
-- **Field → Stacks + MIP** (`CQ1_FieldtoStacks_parallel_MIP/`) — assembles
-  raw per-field CQ1 tile images into per-well/per-field multi-channel
-  OME-TIFF stacks, then writes a max-intensity-projection (MIP) overview.
-- **Stitching + MIP** (`CQ1_Stitching_Wholemount_MIP/`) — stitches tiled
-  CQ1 wholemount acquisitions into one image per well/grid, then writes the
-  same kind of MIP overview.
-- **`CQ1_Toolkit_Launcher/`** — a tiny Tkinter launcher with no import
-  dependency on either tool; it just starts each tool's own built exe as a
-  subprocess. Exists so both tools can ship as one unzip-and-run folder even
-  though they can't be merged into a single PyInstaller build (both projects
-  define same-named modules like `mip_plotter.py` with different contents).
+## Get the toolkit
 
-For end-user instructions (which tool to pick, why "Channel names" is
-required, handling a plate with mixed staining, where output lands,
-troubleshooting), see [`USAGE.txt`](USAGE.txt).
+**[⬇ Download the latest release](https://github.com/mschrmschr/yokogawa-cq1-image-processing-toolkit/releases/latest)**
 
-## Download
+1. On the release page, download the `.zip` file (e.g.
+   `CQ1_Toolkit_v1.0.0_win.zip`) under **Assets**.
+2. Unzip the whole folder anywhere — Desktop, Documents, a network share.
+   Keep everything inside it together; don't pull files out individually.
+3. Open the unzipped folder and double-click `CQ1_Toolkit_Launcher.exe`.
+4. Pick a tool from the launcher window and follow its GUI.
 
-No Python or build step needed to run the toolkit — grab the ready-to-run
-build from [Releases](https://github.com/mschrmschr/CQ1_Toolkit/releases):
+![CQ1 Toolkit launcher](docs/images/launcher.png)
 
-1. Download `CQ1_Toolkit_v1.0.0_win.zip` from the latest release
-2. Unzip anywhere (Desktop, Documents, a network share)
-3. Double-click `CQ1_Toolkit_Launcher.exe` and pick a tool
+That's it — nothing to install first. The window can take 10–20 seconds to
+open the first time; that's normal, just wait.
 
-This repository itself holds source only (see below) — the release zip is
-where the actual Windows executables live.
+If Windows SmartScreen or your antivirus blocks the exe as "unrecognized
+publisher," that's expected for an unsigned internal tool — click
+"More info" → "Run anyway," or ask IT to allow it.
+
+For full step-by-step instructions once it's open (which tool to pick, how
+to fill in "Channel names," handling a plate with mixed staining, where your
+results land, and troubleshooting), see [`USAGE.txt`](USAGE.txt) — the same
+file also ships inside the zip next to the launcher exe.
+
+## What the two tools do
+
+- **Field → Stacks + MIP** turns each CQ1 field into one proper
+  multi-channel image stack, then makes a quick-look overview image.
+- **Stitching + MIP** stitches CQ1 tiled wholemount scans into one big image
+  per well, then makes the same kind of overview image.
+
+Both point at the same kind of dataset folder — one containing CQ1's own
+`MeasurementResult.ome.xml` file and an `Image\` subfolder of raw images —
+and both ask you to type in your real channel names (DAPI, GFP, etc.),
+because CQ1 itself only ever labels them generically ("CH1", "CH2"). See
+[`USAGE.txt`](USAGE.txt) for guidance on which tool fits your data.
+
+---
+
+The rest of this page is for people building the toolkit from source —
+not needed just to run it.
 
 ## Repository layout
 
@@ -54,17 +68,20 @@ CQ1_FieldtoStacks_parallel_MIP/
   run_from_config_ome_parallel.py   batch/CLI entry point (jobs_ome.json)
   jobs_ome.example.json       copy to jobs_ome.json and edit for your data
   jobs_ome.schema.json
+  requirements.txt
   build_exe.ps1
 
 CQ1_Stitching_Wholemount_MIP/
   gui.py                      single-dataset GUI front end
   checklist_widget.py         shared Tk "Wells" checklist widget (byte-identical
                                copy in both tool projects, see repo layout note)
+  main.py                     routes to the stitcher backends (classic/seamless/tiny)
   stitcher_unified.py         tile stitching backends (classic/seamless/tiny)
   ome_metadata.py             CQ1 OME-XML -> per-tile metadata CSV
   mip_plotter.py               MIP panel PNG generation
   run_jobs.py                 batch/CLI entry point (jobs.json)
   jobs.example.json           copy to jobs.json and edit for your data
+  requirements.txt
   build_exe.ps1
   README.md                   developer notes: FIJI-compatibility details,
                                stitch backend tradeoffs, bug history
@@ -74,6 +91,18 @@ CQ1_Stitching_Wholemount_MIP/
 import, for the same reason the two tools aren't merged into one PyInstaller
 build (see `CQ1_Toolkit_Launcher/` above) — each tool has to stay independently
 buildable with zero cross-project import dependency.
+
+## Requirements (building/running from source)
+
+The release zip needs none of this — it's only for working with the Python
+source directly. Each tool is Python 3 + its own `requirements.txt`:
+
+- `CQ1_FieldtoStacks_parallel_MIP`: `numpy`, `tifffile`, `matplotlib`, `lxml`
+- `CQ1_Stitching_Wholemount_MIP`: `numpy`, `pandas`, `tifffile`, `tqdm`,
+  `imagecodecs`, optionally `ome_types` (recovers channel names from OME-XML
+  when reading a stack back)
+- `CQ1_Toolkit_Launcher`: no third-party dependencies — Tkinter from the
+  standard library only
 
 ## Building from source
 
@@ -99,3 +128,7 @@ CQ1_Stitching_Wholemount_MIP` to `CQ1_Toolkit\tools\Stitching`, and add
 Real job configs (`jobs.json` / `jobs_ome.json`) are gitignored since they
 can contain real dataset paths — copy the `.example.json` file in each
 project and edit it, or use each tool's GUI instead.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
