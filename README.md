@@ -25,8 +25,9 @@ publisher," that's expected for an unsigned internal tool — click
 
 For full step-by-step instructions once it's open (which tool to pick, how
 to fill in "Channel names," handling a plate with mixed staining, where your
-results land, and troubleshooting), see [`USAGE.txt`](USAGE.txt) — the same
-file also ships inside the zip next to the launcher exe.
+results land, and troubleshooting), see [`How_to_use.md`](How_to_use.md) —
+the same content also ships inside the zip as `README.txt`, next to the
+launcher exe.
 
 ## What the two tools do
 
@@ -39,7 +40,7 @@ Both point at the same kind of dataset folder — one containing CQ1's own
 `MeasurementResult.ome.xml` file and an `Image\` subfolder of raw images —
 and both ask you to type in your real channel names (DAPI, GFP, etc.),
 because CQ1 itself only ever labels them generically ("CH1", "CH2"). See
-[`USAGE.txt`](USAGE.txt) for guidance on which tool fits your data.
+[`How_to_use.md`](How_to_use.md) for guidance on which tool fits your data.
 
 ---
 
@@ -123,7 +124,7 @@ CQ1_Toolkit_Launcher\*` to a `CQ1_Toolkit\` folder, copy
 `CQ1_FieldtoStacks_parallel_MIP\dist\CQ1_FieldtoStacks_parallel_MIP` to
 `CQ1_Toolkit\tools\FieldToStacks`, copy `CQ1_Stitching_Wholemount_MIP\dist\
 CQ1_Stitching_Wholemount_MIP` to `CQ1_Toolkit\tools\Stitching`, and add
-`USAGE.txt` as `README.txt` alongside the launcher exe.
+`How_to_use.md` as `README.txt` alongside the launcher exe.
 
 Real job configs (`jobs.json` / `jobs_ome.json`) are gitignored since they
 can contain real dataset paths — copy the `.example.json` file in each
