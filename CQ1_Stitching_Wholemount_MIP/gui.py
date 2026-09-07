@@ -19,6 +19,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 from run_jobs import run_job, _resolve
+from checklist_widget import WellChecklist
+from ome_metadata import list_wells
 
 
 def _parse_csv(text: str) -> list[str]:
@@ -83,6 +85,7 @@ class App(ttk.Frame):
         self.pack(fill="both", expand=True)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
+        self.well_scan_queue: "queue.Queue[tuple]" = queue.Queue()
         self.output_dir: str | None = None
         self.running = False
         self.advanced_widgets: list[tk.Widget] = []
@@ -90,6 +93,7 @@ class App(ttk.Frame):
         self._build_form()
         self._build_actions()
         self.after(100, self._poll_log)
+        self.after(100, self._poll_well_scan)
 
     # ---- form ----
 
@@ -146,14 +150,31 @@ class App(ttk.Frame):
         row += 1
         ttk.Label(
             form,
-            text="Folder containing MeasurementResult.ome.xml and an Image\\ subfolder.",
+            text="The folder for one CQ1 acquisition -- should contain "
+                 "MeasurementResult.ome.xml and an Image\\ subfolder.",
             foreground="#666666",
         ).grid(row=row, column=0, columnspan=3, sticky="w")
         row += 1
 
+        add_label("Wells")
+        self.well_checklist = WellChecklist(form)
+        self.well_checklist.grid(row=row, column=0, columnspan=3, sticky="w")
+        self.well_checklist.set_status("Pick a dataset folder above to see its wells here.")
+        row += 1
+
         self.channel_names_var = add_field(
-            "Channel names (same order/count)", entry_factory, "DAPI,GFP,RFP,FarRed"
+            "Channel names (comma-separated, one per channel, in acquisition order)",
+            entry_factory, "DAPI,GFP,RFP,FarRed",
         )
+        ttk.Label(
+            form,
+            text="1st name = channel 1, 2nd name = channel 2, and so on, in the order "
+                 "channels were acquired. Applies to every checked well -- wells "
+                 "stained differently? Check just one staining group above, run, "
+                 "then check the next group and run again.",
+            foreground="#666666", wraplength=640,
+        ).grid(row=row, column=0, columnspan=3, sticky="w")
+        row += 1
 
         # -- Advanced toggle --
         self.show_advanced_var = tk.BooleanVar(value=False)
@@ -175,16 +196,36 @@ class App(ttk.Frame):
         )
 
         add_label("Filters / dry run", bold=True, advanced=True)
-        self.only_well_var = add_field("Only well (blank = all)", entry_factory, "", advanced=True)
-        self.only_grid_var = add_field("Only grid index (blank = all)", entry_factory, "", advanced=True)
-        self.only_z_var = add_field("Only Z plane (blank = all)", entry_factory, "", advanced=True)
-        self.dry_run_var = add_field("Dry run (list only, don't write)", check_factory, "0", advanced=True)
+        self.only_well_var = add_field(
+            "Only well (override -- leave blank to use the Wells checklist above; "
+            "only needed if the automatic scan failed)",
+            entry_factory, "", advanced=True,
+        )
+        self.only_grid_var = add_field(
+            "Only grid index (for wells with more than one tiled region; blank = all)",
+            entry_factory, "", advanced=True,
+        )
+        self.only_z_var = add_field("Only Z plane (process a single slice; blank = all)", entry_factory, "", advanced=True)
+        self.dry_run_var = add_field(
+            "Dry run (list what would be processed, write nothing)", check_factory, "0", advanced=True
+        )
 
         add_label("Output file options", bold=True, advanced=True)
-        self.overlap_fraction_var = add_field("Nominal overlap fraction", entry_factory, "0.01", advanced=True)
-        self.compression_var = add_field("TIFF compression", combo_factory(["zlib", "none"]), "zlib", advanced=True)
-        self.compression_level_var = add_field("Compression level (0-9)", entry_factory, "6", advanced=True)
-        self.predictor_var = add_field("Predictor", check_factory, "1", advanced=True)
+        self.overlap_fraction_var = add_field(
+            "Fallback overlap fraction (only used if stage positions can't measure the real tile overlap)",
+            entry_factory, "0.01", advanced=True,
+        )
+        self.compression_var = add_field("TIFF compression", combo_factory(["zlib", "zstd", "none"]), "zlib", advanced=True)
+        self.compression_level_var = add_field(
+            "Compression level (zlib: 0-9, zstd: 0-22 -- higher = smaller file, slower write)",
+            entry_factory, "6", advanced=True,
+        )
+        self.predictor_var = add_field(
+            "Predictor (this checkbox has no effect on the output either way -- "
+            "benchmarking showed it makes this data larger, not smaller, so it's "
+            "intentionally kept off internally regardless of this setting; see README)",
+            check_factory, "1", advanced=True,
+        )
         self.tile_var = add_field("Tile size (width,height)", entry_factory, "512,512", advanced=True)
         self.bigtiff_var = add_field("BigTIFF", check_factory, "1", advanced=True)
         self.pyramids_var = add_field("Pyramids (not yet implemented, no-op)", check_factory, "0", advanced=True)
@@ -207,7 +248,8 @@ class App(ttk.Frame):
             "Gain-match channels (blank = all, comma-sep)", entry_factory, "", advanced=True
         )
 
-        add_label("MIP Panel PNG", bold=True, advanced=True)
+        add_label("MIP generation", bold=True, advanced=True)
+        self.generate_mip_var = add_field("Generate MIP after stitching", check_factory, "1", advanced=True)
         self.mip_output_dir_var = add_field(
             "MIP output folder (blank = <output>\\mip)", entry_factory, "", advanced=True
         )
@@ -240,6 +282,41 @@ class App(ttk.Frame):
         path = filedialog.askdirectory(title="Select dataset folder")
         if path:
             self.root_dir_var.set(path)
+            self.well_checklist.clear()
+            self._scan_wells(path)
+
+    def _scan_wells(self, root_dir: str) -> None:
+        xml_name = self.xml_file_var.get().strip() or "MeasurementResult.ome.xml"
+        xml_path = os.path.join(root_dir, xml_name)
+        if not os.path.isfile(xml_path):
+            self.well_checklist.set_status(f"No {xml_name} found in this folder.", error=True)
+            return
+        self.well_checklist.set_status("Scanning wells…")
+        threading.Thread(target=self._scan_wells_worker, args=(xml_path,), daemon=True).start()
+
+    def _scan_wells_worker(self, xml_path: str) -> None:
+        try:
+            wells = list_wells(xml_path)
+            self.well_scan_queue.put(("ok", wells))
+        except Exception as e:
+            self.well_scan_queue.put(("err", str(e)))
+
+    def _poll_well_scan(self) -> None:
+        try:
+            while True:
+                status, payload = self.well_scan_queue.get_nowait()
+                if status == "ok":
+                    if payload:
+                        self.well_checklist.set_wells(payload)
+                    else:
+                        self.well_checklist.set_status(
+                            "No wells detected in this dataset's XML.", error=True
+                        )
+                else:
+                    self.well_checklist.set_status(f"Could not read wells: {payload}", error=True)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_well_scan)
 
     # ---- actions / log ----
 
@@ -308,6 +385,7 @@ class App(ttk.Frame):
             "stitch_backend": "seamless",
             "placement": "stage",
             "dry_run": self.dry_run_var.get() == "1",
+            "generate_mip": self.generate_mip_var.get() == "1",
             "overlap_fraction": _parse_float(self.overlap_fraction_var.get(), 0.01),
             "compression": None if compression == "none" else compression,
             "compression_level": _parse_int(self.compression_level_var.get(), 6),
@@ -330,7 +408,13 @@ class App(ttk.Frame):
 
         only_well = self.only_well_var.get().strip()
         if only_well:
+            # Advanced override always wins -- guarantees a run is still
+            # possible even if the automatic well scan failed or is stale.
             job["only_well"] = only_well
+        elif not self.well_checklist.all_checked():
+            checked = self.well_checklist.get_checked()
+            if checked:
+                job["only_wells"] = checked
         only_grid = self.only_grid_var.get().strip()
         if only_grid:
             job["only_grid"] = int(only_grid)

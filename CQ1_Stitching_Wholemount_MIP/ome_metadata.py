@@ -15,6 +15,28 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 
+# Shared with generate_metadata_csv's own parse_image_name() below and with
+# list_wells() -- factored out so the two can never drift on what counts as
+# a valid CQ1 ImageName.
+_IMAGE_NAME_RE = re.compile(r"W(\d+)\(R(\d+)C(\d+)\),A(\d+),F(\d+)")
+
+
+def list_wells(xml_path: str) -> "list[str]":
+    """Cheap well enumeration for GUI checklists: a single streaming XML pass
+    over Image/@Name only -- no stage-position merge, no pandas, no pixel I/O.
+    `generate_metadata_csv` (below) stays the source of truth for the real
+    stage/grid geometry the actual stitch needs; this is only for populating
+    a "which wells exist" checklist quickly right after Browse."""
+    ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2013-06"}
+    wells: set = set()
+    for _, elem in ET.iterparse(xml_path, events=("end",)):
+        if elem.tag == f"{{{ns['ome']}}}Image":
+            m = _IMAGE_NAME_RE.match(elem.attrib.get("Name", ""))
+            if m:
+                wells.add(f"W{m.group(1)}")
+            elem.clear()
+    return sorted(wells)
+
 
 def _median_step(unique_positions: np.ndarray) -> float:
     """Median positive step among unique sorted positions; NaN if not enough points."""
@@ -101,7 +123,7 @@ def generate_metadata_csv(xml_path: str, output_csv: str, overlap_fraction: floa
 
     # ---- 3) Parse WellID, GridIndex, FieldIndex from ImageName ----
     def parse_image_name(name):
-        m = re.match(r"W(\d+)\(R(\d+)C(\d+)\),A(\d+),F(\d+)", str(name))
+        m = _IMAGE_NAME_RE.match(str(name))
         if m:
             return f"W{m.group(1)}", int(m.group(4)), int(m.group(5))
         return None, None, None

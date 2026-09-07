@@ -83,6 +83,48 @@ The stitched wholemount is a standard OME-TIFF openable directly in FIJI via
 Bio-Formats (`File > Import > Bio-Formats`), with correct channel names and
 pixel calibration.
 
+### Output compression (`compression` / `compression_level` in `jobs.json`,
+"TIFF compression" / "Compression level" under Advanced options in the GUI)
+
+Every stitched stack is already written with **lossless** compression by
+default (`compression: "zlib"`, `compression_level: 6`) -- no pixel values
+are ever changed by any of these settings, only how compactly they're
+packed on disk.
+
+Choices, benchmarked against a real 1.62 GB stitched stack (20 sampled
+planes, `(3789, 3789)` uint16 each):
+
+| `compression` | size vs. raw pixels | vs. `zlib` default | opens in FIJI/Bio-Formats |
+|---|---|---|---|
+| `zlib` (default) | 44.7% | -- | yes |
+| `zstd` (level 19) | 40.1% | ~10% smaller | yes -- verified byte-identical read-back |
+| `none` | 100% | much larger | yes |
+
+`zstd` is the one worthwhile alternative: genuinely smaller, still fully
+lossless, and confirmed (via a headless Fiji/Bio-Formats round-trip, not
+just `tifffile` reading its own output) to decode back byte-for-byte
+identical to the source. It's slower to write than `zlib`, though writing
+is a small fraction of a stitching job's total time. `compression_level`
+means something different per scheme: `zlib` uses 0-9, `zstd` uses 0-22
+(higher is smaller/slower for both).
+
+`LZW` and `LZMA` were also tried and rejected: `LZW` compresses *worse*
+than `zlib` on this data (CQ1 fluorescence images are dominated by
+photon shot noise, not the kind of redundancy LZW exploits), and `LZMA`
+compresses best of all (~36% of raw) but **isn't readable by Bio-Formats
+at all** (`EnumException: Unable to find TiffCompresssion with code:
+34925`) -- confirmed by trying to open an LZMA-compressed sample in Fiji
+headless before it went anywhere near a real dataset. Neither is exposed
+as a choice.
+
+The TIFF "predictor" option (horizontal differencing before compression)
+is deliberately a no-op regardless of the `predictor` setting -- see the
+comment on `_writer_kwargs()` in `stitcher_unified.py`. It measurably
+helps on smooth synthetic gradients but measurably *hurts* on this
+project's real, noise-dominated data (~2.6% larger on the same benchmark
+file). Left in place as a no-op rather than removed, so a future config
+change here doesn't need to relearn this.
+
 ## Stitch backends (`stitch_backend` in `jobs.json`)
 
 - **`classic`** — straight tile paste, no blending. Fastest; visible seams if

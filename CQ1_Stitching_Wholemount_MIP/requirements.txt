@@ -2,4 +2,5 @@ numpy
 pandas
 tifffile
 tqdm
+imagecodecs
 # optional: ome_types (recovers channel names from OME-XML when reading a stack back)

@@ -18,8 +18,9 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-from ome_xml_assembler import assemble_one_job
+from ome_xml_assembler import assemble_one_job, list_wells
 from run_from_config_ome_parallel import _inject_paths, _validate_job, _run_mip_for_job
+from checklist_widget import WellChecklist
 
 
 def _parse_csv(text: str) -> list[str]:
@@ -84,12 +85,14 @@ class App(ttk.Frame):
         self.pack(fill="both", expand=True)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
+        self.well_scan_queue: "queue.Queue[tuple]" = queue.Queue()
         self.output_dir: str | None = None
         self.running = False
 
         self._build_form()
         self._build_actions()
         self.after(100, self._poll_log)
+        self.after(100, self._poll_well_scan)
 
     # ---- form ----
 
@@ -148,15 +151,36 @@ class App(ttk.Frame):
         row += 1
         ttk.Label(
             form,
-            text="Folder containing MeasurementResult.ome.xml and an Image\\ subfolder.",
+            text="The folder for one CQ1 acquisition -- should contain "
+                 "MeasurementResult.ome.xml and an Image\\ subfolder.",
             foreground="#666666",
         ).grid(row=row, column=0, columnspan=3, sticky="w")
         row += 1
 
-        self.channels_var = add_field("Channels (comma-separated)", entry_factory, "C1,C2,C3,C4")
-        self.channel_names_var = add_field(
-            "Channel names (same order/count)", entry_factory, "DAPI,GFP,RFP,FarRed"
+        add_label("Wells")
+        self.well_checklist = WellChecklist(form)
+        self.well_checklist.grid(row=row, column=0, columnspan=3, sticky="w")
+        self.well_checklist.set_status("Pick a dataset folder above to see its wells here.")
+        row += 1
+
+        self.channels_var = add_field(
+            "Channel IDs in raw filenames (comma-separated, e.g. C1,C2,C3,C4)",
+            entry_factory, "C1,C2,C3,C4",
         )
+        self.channel_names_var = add_field(
+            "Channel names (comma-separated, one per ID above, same order)",
+            entry_factory, "DAPI,GFP,RFP,FarRed",
+        )
+        ttk.Label(
+            form,
+            text="1st name = channel 1 (the 1st ID above, e.g. C1), 2nd name = "
+                 "channel 2 (C2), and so on -- same order as the IDs above. Applies "
+                 "to every checked well -- wells stained differently? Check just "
+                 "one staining group above, run, then check the next group and run "
+                 "again.",
+            foreground="#666666", wraplength=640,
+        ).grid(row=row, column=0, columnspan=3, sticky="w")
+        row += 1
 
         # -- Advanced toggle --
         self.show_advanced_var = tk.BooleanVar(value=False)
@@ -182,9 +206,16 @@ class App(ttk.Frame):
         self.enforce_equal_z_var = add_field(
             "Enforce equal Z across channels", check_factory, "1", advanced=True
         )
-        self.split_by_w_var = add_field("Split by well within field", check_factory, "1", advanced=True)
+        self.split_by_w_var = add_field(
+            "Split by well within field (on: one stack per well, works with the "
+            "Wells checklist above; off: one stack per field, first well only)",
+            check_factory, "1", advanced=True,
+        )
+        self.split_by_w_var.trace_add("write", lambda *_: self._update_well_note())
         self.only_well_var = add_field(
-            "Only well (number, blank = all, e.g. 1 for W0001)", entry_factory, "", advanced=True
+            "Only well (override -- leave blank to use the Wells checklist above; "
+            "only needed if the automatic scan failed)",
+            entry_factory, "", advanced=True,
         )
         self.save_dir_var = add_field(
             "Output folder override (blank = <dataset>\\Stacks)", entry_factory, "", advanced=True
@@ -222,6 +253,50 @@ class App(ttk.Frame):
         path = filedialog.askdirectory(title="Select dataset folder")
         if path:
             self.base_path_var.set(path)
+            self.well_checklist.clear()
+            self._scan_wells(path)
+
+    def _scan_wells(self, base_path: str) -> None:
+        image_dir = os.path.join(base_path, "Image")
+        if not os.path.isdir(image_dir):
+            self.well_checklist.set_status("No Image\\ subfolder found in this dataset folder.", error=True)
+            return
+        self.well_checklist.set_status("Scanning wells…")
+        threading.Thread(target=self._scan_wells_worker, args=(image_dir,), daemon=True).start()
+
+    def _scan_wells_worker(self, image_dir: str) -> None:
+        try:
+            wells = list_wells(image_dir)
+            self.well_scan_queue.put(("ok", wells))
+        except Exception as e:
+            self.well_scan_queue.put(("err", str(e)))
+
+    def _poll_well_scan(self) -> None:
+        try:
+            while True:
+                status, payload = self.well_scan_queue.get_nowait()
+                if status == "ok":
+                    if payload:
+                        self.well_checklist.set_wells([f"W{w:04d}" for w in payload])
+                    else:
+                        self.well_checklist.set_status(
+                            "No wells detected in this dataset.", error=True
+                        )
+                    self._update_well_note()
+                else:
+                    self.well_checklist.set_status(f"Could not read wells: {payload}", error=True)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_well_scan)
+
+    def _update_well_note(self) -> None:
+        if self.split_by_w_var.get() != "1" and self.well_checklist.has_labels():
+            self.well_checklist.set_note(
+                "Note: only the first well listed will be processed unless "
+                "'Split by well within field' is enabled above."
+            )
+        else:
+            self.well_checklist.set_note("")
 
     # ---- actions / log ----
 
@@ -297,7 +372,13 @@ class App(ttk.Frame):
 
         only_well = _parse_int(self.only_well_var.get(), None)
         if only_well is not None:
+            # Advanced override always wins -- guarantees a run is still
+            # possible even if the automatic well scan failed or is stale.
             job["only_well"] = only_well
+        elif not self.well_checklist.all_checked():
+            checked = self.well_checklist.get_checked()
+            if checked:
+                job["only_wells"] = [int(label.lstrip("W")) for label in checked]
 
         job["mip"] = {
             "projection": self.mip_projection_var.get(),

@@ -46,9 +46,8 @@ Copy-Item "$src\requirements.txt" $build
 Set-Location $build
 
 # 2. Build --onedir --windowed (gui.py is the entry point, no console window).
-#    No --collect-all needed: numpy/pandas/tifffile/tqdm have no compiled
-#    extensions PyInstaller's static analysis tends to miss (unlike lxml in
-#    the FieldToStacks tool).
+#    numpy/pandas/tifffile/tqdm have no compiled extensions PyInstaller's
+#    static analysis tends to miss (unlike lxml in the FieldToStacks tool).
 #    matplotlib is now a real dependency (mip_plotter.py writes a colorized
 #    MIP panel PNG) and calls matplotlib.use("Agg") at module level, so
 #    PyInstaller's backend auto-detection picks the lightweight headless
@@ -57,8 +56,16 @@ Set-Location $build
 #    matplotlib/PySide6 outright because nothing used matplotlib and
 #    pandas' optional-plotting hook was pulling in a full unused Qt
 #    toolkit; that's no longer true now that matplotlib is genuinely used.)
+#    imagecodecs (added for zstd TIFF compression, see README's compression
+#    section) ships ~65 separate compiled per-codec extension submodules
+#    (_zstd, _lzw, _jpeg, ...) that tifffile imports from lazily at the
+#    point a given codec is actually used -- the same "PyInstaller's static
+#    scanner can't see this" shape as the lxml/etree DLL issue this project
+#    already hit once (see plan doc 6a). --collect-all bundles all of them
+#    regardless of what static analysis would have found on its own.
 & $condaPython -m PyInstaller --onedir --windowed --noconfirm `
     --name $toolName `
+    --collect-all imagecodecs `
     gui.py
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed (exit $LASTEXITCODE) -- see output above. Not touching the existing dist\ folder."

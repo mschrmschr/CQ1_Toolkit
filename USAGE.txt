@@ -17,7 +17,8 @@ No install needed, no admin rights needed, no Python needed.
 
 Each tool opens its own window with a "Browse..." button to pick your
 dataset folder (the folder containing MeasurementResult.ome.xml and an
-Image\ subfolder), an "Advanced options" toggle for tuning knobs, a Run
+Image\ subfolder), a "Wells" checklist that fills in automatically once
+you pick a folder, an "Advanced options" toggle for tuning knobs, a Run
 button, and a log pane. When it finishes, "Open output folder" jumps
 straight to the results.
 
@@ -75,38 +76,56 @@ Rules that matter:
   what appears as the label on each panel of the MIP overview image.
 
 
-Different wells stained differently? Use "Only well"
-=======================================================
+Picking which wells to process
+================================
+
+Right after you pick a dataset folder, both tools automatically read its
+wells straight from the metadata and show them as a "Wells" checklist,
+every box ticked by default -- untick any wells you don't want included,
+then click Run and only the ticked wells are processed.
+
+If the automatic scan fails for some reason (you'll see a red message
+there instead of checkboxes -- e.g. the dataset folder turned out not to
+have the expected layout), open "Advanced options" and type a well
+number straight into "Only well" instead; it always overrides the
+checklist, so a failed scan never blocks you from running.
+
+
+Different wells stained differently? Run once per staining group
+====================================================================
 
 CQ1 plates can have different wells stained with completely different
 things -- e.g. well W1 is DAPI/GFP/RFP but well W2 is a different panel
 entirely. Since "Channel names" is one setting for the whole run, you
 can't mix stainings in a single click of "Run".
 
-Instead, open "Advanced options" and use the "Only well" field to run
-the tool once per staining group:
+Instead, run the tool once per staining group, using the Wells checklist:
 
-1. Set "Only well" to the well you want (a number, e.g. 1 for well W1),
-   set "Channel names" to match that well's actual staining, click Run.
-2. Change "Only well" to the next well, change "Channel names" to match
-   ITS staining, click Run again -- into the SAME output folder.
+1. In the Wells checklist, untick everything except the well(s) that
+   share one staining, set "Channel names" to match that staining,
+   click Run.
+2. Untick those, tick the next group's well(s) instead, change "Channel
+   names" to match THEIR staining, click Run again -- into the SAME
+   output folder.
 
 This is safe to repeat: output filenames already include the well
 number, so different wells' runs never overwrite each other, and the
-MIP step is automatically scoped to just the well you're running so an
-earlier well's overview image never gets relabeled by a later run's
+MIP step is automatically scoped to just the well(s) you ticked, so an
+earlier group's overview image never gets relabeled by a later run's
 channel names.
 
-(Field -> Stacks + MIP has the same "Only well" field, under Advanced
-options -> Assembly options; it's only useful there together with
-"Split by well within field" turned on, since that's what makes the
-tool tell wells apart in the first place -- it's on by default.)
+(Field -> Stacks + MIP's Wells checklist only matters together with
+"Split by well within field" turned on, under Advanced options ->
+Assembly options -- that's what makes the tool tell wells apart in the
+first place. It's on by default; turned off, only the first well found
+in each field is ever processed, regardless of what's ticked.)
 
-There's also an "Only grid" / "Only grid index" field for the
-Stitching tool -- that's for when a single well itself contains more
+There's also an "Only grid index" field for the Stitching tool, under
+Advanced options -- that's for when a single well itself contains more
 than one separate tiled region (e.g. two tissue pieces mounted in the
-same well, scanned as two grids). Same idea, different axis: leave
-blank to process every grid, or set it to isolate one.
+same well, scanned as two grids). The Wells checklist doesn't cover
+this axis -- a ticked well's grids are always processed together; leave
+"Only grid index" blank to process every grid, or set it to isolate one.
 
 
 Where to find your results
@@ -124,6 +143,46 @@ The stitched/stacked .ome.tif files are the real data -- open those in
 FIJI (File -> Import -> Bio-Formats) for anything quantitative. The MIP
 panel PNGs are a quick-look overview only, for eyeballing that a run
 looks right, not for measurements.
+
+
+Advanced options worth knowing about
+======================================
+
+Most Advanced fields are fine left at their defaults. A few are worth
+understanding if you're tempted to change them:
+
+Generate MIP after stitching / assembly (both tools, default ON)
+  Turn off if you only want the full-resolution .ome.tif output and
+  don't need the quick-look overview PNG -- saves a bit of time.
+
+TIFF compression (Stitching, default zlib)
+  Both zlib and zstd are lossless -- no pixel data changes either way,
+  only file size. Benchmarked on a real 1.62 GB stitched file:
+    zlib (default): ~45% of the uncompressed size
+    zstd:           ~40% of the uncompressed size (smaller, still opens
+                     fine in FIJI/Bio-Formats)
+  "none" skips compression entirely -- fastest write, largest file; only
+  worth it if disk space genuinely isn't a concern.
+
+Compression level (Stitching)
+  Higher = smaller file, slower write. Pushing zlib past its default of
+  6 usually isn't worth it (level 9 only saved ~1.5% more in testing, for
+  about 6x the write time). zstd's useful range is wider (0-22).
+
+Predictor (Stitching)
+  This checkbox has no effect on the output either way, checked or not --
+  testing on real CQ1 fluorescence data showed enabling it makes files
+  ~2.6% LARGER, not smaller (this kind of data is dominated by per-pixel
+  sensor noise, not the smooth gradients this setting is designed to
+  help with), so it's intentionally kept off internally regardless.
+
+Fallback overlap fraction (Stitching, default 0.01)
+  Only used on the rare dataset where tile overlap can't be measured
+  from the stage positions themselves -- normally the real overlap is
+  measured directly from your data, not estimated from this number.
+
+Only grid index (Stitching) / Split by well within field (Field -> Stacks)
+  See "Picking which wells to process" above.
 
 
 Troubleshooting

@@ -129,7 +129,10 @@ def _validate_job(d: Dict[str, Any]) -> JobConfig:
         dtype=str(d["dtype"]) if d.get("dtype") is not None else None,
         split_by_w_within_field=bool(d.get("split_by_w_within_field", False)),
         only_well=int(d["only_well"]) if d.get("only_well") is not None else None,
+        only_wells=[int(w) for w in d["only_wells"]] if d.get("only_wells") is not None else None,
         overwrite=bool(d.get("overwrite", False)),
+        parallel=bool(d.get("parallel", True)),
+        workers=int(d["workers"]) if d.get("workers") is not None else None,
     )
 
 def _default_mip_output_dir(raw_job: Dict[str, Any], job_cfg: JobConfig) -> str:
@@ -155,27 +158,38 @@ def _build_mip_job(raw_job: Dict[str, Any], job_cfg: JobConfig, mip_defaults: Op
     mip_job.setdefault("workers", 1)
     mip_job.setdefault("parallel", True)
     # run_mip_job() scans the *entire* stacks_dir, not just what this job just
-    # assembled -- so on a repeat run scoped to a different well (only_well set,
-    # e.g. to give each well its own channel_names), an unfiltered MIP step would
-    # re-process every well's stacks ever assembled into this folder and relabel
-    # them all with *this* run's channel_names. Default include_keywords to the
-    # well token so a scoped run only touches its own well's files, unless the
-    # job already set its own include_keywords explicitly.
-    if mip_job.get("include_keywords") is None and job_cfg.only_well is not None:
-        mip_job["include_keywords"] = [f"W{job_cfg.only_well:04d}"]
+    # assembled -- so on a repeat run scoped to one or more wells (only_well/
+    # only_wells set, e.g. to give each well its own channel_names), an
+    # unfiltered MIP step would re-process every well's stacks ever assembled
+    # into this folder and relabel them all with *this* run's channel_names.
+    # Default include_keywords to the scoped well token(s) so a scoped run
+    # only touches its own well(s)' files, unless the job already set its own
+    # include_keywords explicitly.
+    if mip_job.get("include_keywords") is None:
+        wells_for_scope = job_cfg.only_wells if job_cfg.only_wells else (
+            [job_cfg.only_well] if job_cfg.only_well is not None else None
+        )
+        if wells_for_scope:
+            mip_job["include_keywords"] = [f"W{w:04d}" for w in wells_for_scope]
     return mip_job
 
 
 def _run_mip_for_job(raw_job: Dict[str, Any], job_cfg: JobConfig, mip_defaults: Optional[Dict[str, Any]]) -> None:
     """Build the merged MIP job for `raw_job`/`job_cfg` and run it via `mip_plotter.run_mip_job`, printing a summary."""
     mip_job = _build_mip_job(raw_job, job_cfg, mip_defaults)
-    # Always single-process: this build ships as a frozen PyInstaller exe, where
-    # ProcessPoolExecutor workers are the most common source of relaunch-loop /
-    # extra-spawned-exe headaches on Windows. "workers"/"parallel" config keys
-    # are ignored here on purpose.
-    mip_job.pop("workers", None)
-    mip_job.pop("parallel", None)
-    workers = 1
+    if getattr(sys, "frozen", False):
+        # Always single-process when actually running as the frozen gui.exe:
+        # ProcessPoolExecutor workers are the most common source of
+        # relaunch-loop / extra-spawned-exe headaches on Windows under
+        # PyInstaller. "workers"/"parallel" config keys are ignored here on
+        # purpose. This script itself is never frozen (only gui.py is, per
+        # build_exe.ps1) -- see the branch below for the plain-script path.
+        mip_job.pop("workers", None)
+        mip_job.pop("parallel", None)
+        workers = 1
+    else:
+        parallel = bool(mip_job.pop("parallel", True))
+        workers = int(mip_job.pop("workers", 1)) if parallel else 1
     print(f"\n🔬 Generating MIPs: {mip_job['stacks_dir']} -> {mip_job['output_dir']}")
     summary = run_mip_job(mip_job, workers=workers)
     print(f"🖼️ MIP: wrote {summary['written']} file(s), {len(summary['warnings'])} warning(s).")

@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple, Any, Set
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 from lxml import etree
@@ -74,6 +76,11 @@ class JobConfig:
             set to match, into the same `save_dir` -- output filenames
             already include the well number, so repeated runs don't
             collide.
+        only_wells: Same idea as `only_well` but for a set of wells at once
+            (e.g. from a GUI checklist); takes priority over `only_well`
+            when both are set. Still meant for one `channel_names` group at
+            a time -- wells with different staining still need separate
+            runs.
         overwrite: If False (default), a field/well whose output OME-TIFF
             already exists in `save_dir` is skipped (its source Z-planes are
             never re-read) instead of being rewritten -- lets a crashed/killed
@@ -101,7 +108,19 @@ class JobConfig:
     # In flat mode: write per Well inside each Field (and also in FieldXXXX mode)
     split_by_w_within_field: bool = False
     only_well: Optional[int] = None
+    only_wells: Optional[List[int]] = None
     overwrite: bool = False
+
+    # Parallel field/well assembly: each field (or field+well) is written
+    # independently, so this can run across a process pool. `parallel=False`
+    # forces serial assembly even when unfrozen (e.g. to keep CPU usage down
+    # on a shared machine). `workers=None` auto-picks min(cpu_count, 4) --
+    # kept separate from `parallel` so "not set" is distinguishable from an
+    # explicit "workers": 1. Ignored (forced to 1 worker) when running as the
+    # frozen gui.exe, to avoid ProcessPoolExecutor's known PyInstaller
+    # relaunch-loop risk -- see _resolve_assembly_workers.
+    parallel: bool = True
+    workers: Optional[int] = None
 
 
 # ----------------------------
@@ -230,6 +249,21 @@ def _scan_flat_wfztc(dir_path: str) -> Dict[int, Dict[int, Dict[str, List[Tuple[
     return index
 
 
+def list_wells(base_dir: str) -> List[int]:
+    """Cheap well enumeration for GUI checklists: os.listdir + regex only, no
+    TIFF reads. Mirrors assemble_one_job's own layout detection (flat WFZC
+    filenames vs. FieldXXXX subfolders each scanned for WFZC filenames)."""
+    if _iter_existing_fields(base_dir):
+        wells: Set[int] = set()
+        for field in _iter_existing_fields(base_dir):
+            field_dir = os.path.join(base_dir, f"Field{field:04d}")
+            sub_index = _scan_flat_wfztc(field_dir)
+            wells |= {w for wdict in sub_index.values() for w in wdict.keys()}
+        return sorted(wells)
+    flat_index = _scan_flat_wfztc(base_dir)
+    return sorted({w for wdict in flat_index.values() for w in wdict.keys()})
+
+
 # ----------------------------
 # Field selection
 # ----------------------------
@@ -337,14 +371,11 @@ def assemble_one_job(cfg: JobConfig) -> List[str]:
 
         field = int(cfg.field_start)
         out_path = os.path.join(cfg.save_dir, f"F{field:04d}.ome.tif")
-        written = _write_stack_for_group(
-            collected_paths_per_channel,
-            cfg,
-            voxel,
-            image_name=_safe_image_name(image_names, field),
-            out_path=out_path,
+        workers = _resolve_assembly_workers(cfg)
+        return _write_groups(
+            [(collected_paths_per_channel, _safe_image_name(image_names, field), out_path, f"F{field:04d}")],
+            cfg, voxel, workers,
         )
-        return written
 
     # Folder (FieldXXXX) mode — original behavior
     fields = _decide_fields(cfg, image_names)
@@ -353,7 +384,7 @@ def assemble_one_job(cfg: JobConfig) -> List[str]:
         print("🧾 Wrote 0 file(s).")
         return []
 
-    written: List[str] = []
+    groups: List[Tuple[List[List[str]], str, str, str]] = []
     for field in fields:
         field_dir = os.path.join(cfg.base_dir, f"Field{field:04d}")
         label = f"Field{field:04d}"
@@ -368,15 +399,12 @@ def assemble_one_job(cfg: JobConfig) -> List[str]:
                     break
                 collected_paths_per_channel.append(paths)
             else:
-                written.extend(
-                    _write_stack_for_group(
-                        collected_paths_per_channel,
-                        cfg,
-                        voxel,
-                        image_name=_safe_image_name(image_names, field),
-                        out_path=os.path.join(cfg.save_dir, f"F{field:04d}.ome.tif"),
-                    )
-                )
+                groups.append((
+                    collected_paths_per_channel,
+                    _safe_image_name(image_names, field),
+                    os.path.join(cfg.save_dir, f"F{field:04d}.ome.tif"),
+                    label,
+                ))
             continue
 
         # Split by W#### within field directories: reuse flat WFZC scanner on the subfolder
@@ -386,7 +414,10 @@ def assemble_one_job(cfg: JobConfig) -> List[str]:
             continue
 
         wells = sorted({w for wdict in sub_index.values() for w in wdict.keys()})
-        if cfg.only_well is not None:
+        if cfg.only_wells is not None:
+            wanted = set(cfg.only_wells)
+            wells = [w for w in wells if w in wanted]
+        elif cfg.only_well is not None:
             wells = [w for w in wells if w == cfg.only_well]
         print(f"🧪 Wells in {label}: {wells if len(wells)<=20 else str(wells[:10])+' ...'}")
 
@@ -403,13 +434,10 @@ def assemble_one_job(cfg: JobConfig) -> List[str]:
             else:
                 out = os.path.join(cfg.save_dir, f"F{field:04d}_W{w:04d}.ome.tif")
                 name = f"{_safe_image_name(image_names, field)}_W{w:04d}"
-                written.extend(
-                    _write_stack_for_group(
-                        per_channel_paths, cfg, voxel, image_name=name, out_path=out
-                    )
-                )
+                groups.append((per_channel_paths, name, out, f"F{field:04d}_W{w:04d}"))
 
-    return written
+    workers = _resolve_assembly_workers(cfg)
+    return _write_groups(groups, cfg, voxel, workers)
 
 
 def _assemble_flat_wfztc(
@@ -422,13 +450,16 @@ def _assemble_flat_wfztc(
     """
     Assemble from flat WFZC pattern: {F -> W -> C -> [(Z, path)]}
     """
-    written: List[str] = []
+    groups: List[Tuple[List[List[str]], str, str, str]] = []
     fields = sorted(index.keys())
     print(f"🗂  Fields detected in flat dir: {fields if len(fields)<=20 else str(fields[:10])+' ...'}")
 
     for fi, field in enumerate(fields, start=1):
         wells = sorted(index[field].keys())
-        if cfg.only_well is not None:
+        if cfg.only_wells is not None:
+            wanted = set(cfg.only_wells)
+            wells = [w for w in wells if w in wanted]
+        elif cfg.only_well is not None:
             wells = [w for w in wells if w == cfg.only_well]
         if not wells:
             print(f"ℹ️ Field {field:04d}: no wells found, skipping.")
@@ -458,11 +489,10 @@ def _assemble_flat_wfztc(
                 name = (f"{_safe_image_name(image_names, field)}_W{w:04d}"
                         if cfg.split_by_w_within_field
                         else _safe_image_name(image_names, field))
-                written.extend(
-                    _write_stack_for_group(
-                        per_channel_paths, cfg, voxel, image_name=name, out_path=out
-                    )
-                )
+                groups.append((per_channel_paths, name, out, f"F{field:04d}_W{w:04d}"))
+
+    workers = _resolve_assembly_workers(cfg)
+    written = _write_groups(groups, cfg, voxel, workers)
 
     if not written:
         print("ℹ️ No outputs written (likely channel mismatch). "
@@ -479,6 +509,89 @@ def _assemble_flat_wfztc(
 def _safe_image_name(image_names: List[str], field: int) -> str:
     """Return the OME-XML image name for 1-based `field`, or ``"Field{field:04d}"`` if out of range."""
     return image_names[field - 1] if 0 <= (field - 1) < len(image_names) else f"Field{field:04d}"
+
+
+def _resolve_assembly_workers(cfg: "JobConfig") -> int:
+    """Return how many worker processes `_write_groups` should use for `cfg`.
+
+    Always 1 when running as the frozen gui.exe (`sys.frozen`), regardless of
+    `cfg.parallel`/`cfg.workers` -- avoids ProcessPoolExecutor under
+    PyInstaller (see EXE_PACKAGING_PLAN.md). Otherwise 1 if `cfg.parallel` is
+    False, `cfg.workers` if explicitly set, else min(cpu_count, 4).
+    """
+    if getattr(sys, "frozen", False):
+        return 1
+    if not cfg.parallel:
+        return 1
+    if cfg.workers:
+        return max(1, int(cfg.workers))
+    return max(1, min(os.cpu_count() or 1, 4))
+
+
+def _write_group_job(
+    collected_paths_per_channel: List[List[str]],
+    cfg: "JobConfig",
+    voxel: Dict[str, float],
+    image_name: str,
+    out_path: str,
+    label: str,
+) -> Dict[str, Any]:
+    """Worker-process entry point: run `_write_stack_for_group`, converting any exception into a result dict instead of raising across the pool boundary."""
+    try:
+        written = _write_stack_for_group(collected_paths_per_channel, cfg, voxel, image_name, out_path)
+        return {"label": label, "written": written, "error": None}
+    except Exception as e:
+        return {"label": label, "written": [], "error": str(e)}
+
+
+def _write_groups(
+    groups: List[Tuple[List[List[str]], str, str, str]],
+    cfg: "JobConfig",
+    voxel: Dict[str, float],
+    workers: int,
+) -> List[str]:
+    """Write a batch of independent field/well groups, in parallel when `workers` > 1.
+
+    Each group is `(collected_paths_per_channel, image_name, out_path, label)`.
+    Groups whose `out_path` already exists (and `cfg.overwrite` is False) are
+    filtered out up front -- printed and skipped -- before any process pool is
+    created, so a resumed/mostly-done run pays no pool overhead. Falls back to
+    the plain serial call for `workers <= 1` or a single remaining group, so
+    the frozen/serial path stays byte-for-byte identical to calling
+    `_write_stack_for_group` directly.
+    """
+    written: List[str] = []
+    to_write: List[Tuple[List[List[str]], str, str, str]] = []
+    for paths, name, out_path, label in groups:
+        if os.path.exists(out_path) and not cfg.overwrite:
+            print(f"⏭️  Skipping existing: {out_path}")
+            written.append(out_path)
+        else:
+            to_write.append((paths, name, out_path, label))
+
+    if not to_write:
+        return written
+
+    if workers <= 1 or len(to_write) == 1:
+        for paths, name, out_path, label in to_write:
+            written.extend(_write_stack_for_group(paths, cfg, voxel, name, out_path))
+        return written
+
+    n_workers = min(workers, len(to_write))
+    print(f"🧵 Parallel assembly: workers={n_workers}, groups={len(to_write)}")
+    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        futures = {
+            ex.submit(_write_group_job, paths, cfg, voxel, name, out_path, label): label
+            for paths, name, out_path, label in to_write
+        }
+        for fut in as_completed(futures):
+            res = fut.result()
+            if res["error"]:
+                print(f"❌ {res['label']} failed: {res['error']}")
+            else:
+                written.extend(res["written"])
+    return written
+
 
 def _write_stack_for_group(
     collected_paths_per_channel: List[List[str]],

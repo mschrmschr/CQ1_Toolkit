@@ -47,6 +47,8 @@ CQ1_Toolkit_Launcher/
 
 CQ1_FieldtoStacks_parallel_MIP/
   gui.py                      single-dataset GUI front end
+  checklist_widget.py         shared Tk "Wells" checklist widget (byte-identical
+                               copy in both tool projects, see repo layout note)
   ome_xml_assembler.py        raw CQ1 tiles -> per-field/well OME-TIFF stacks
   mip_plotter.py               MIP + colorized panel PNG generation
   run_from_config_ome_parallel.py   batch/CLI entry point (jobs_ome.json)
@@ -56,6 +58,8 @@ CQ1_FieldtoStacks_parallel_MIP/
 
 CQ1_Stitching_Wholemount_MIP/
   gui.py                      single-dataset GUI front end
+  checklist_widget.py         shared Tk "Wells" checklist widget (byte-identical
+                               copy in both tool projects, see repo layout note)
   stitcher_unified.py         tile stitching backends (classic/seamless/tiny)
   ome_metadata.py             CQ1 OME-XML -> per-tile metadata CSV
   mip_plotter.py               MIP panel PNG generation
@@ -65,6 +69,11 @@ CQ1_Stitching_Wholemount_MIP/
   README.md                   developer notes: FIJI-compatibility details,
                                stitch backend tradeoffs, bug history
 ```
+
+`checklist_widget.py` is intentionally duplicated rather than shared via an
+import, for the same reason the two tools aren't merged into one PyInstaller
+build (see `CQ1_Toolkit_Launcher/` above) — each tool has to stay independently
+buildable with zero cross-project import dependency.
 
 ## Building from source
 

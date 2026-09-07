@@ -10,9 +10,11 @@
     "stitch_backend": "seamless",
     "placement": "stage",
     "only_well": null,
+    "only_wells": null,
     "only_grid": null,
     "only_z": null,
     "dry_run": false,
+    "generate_mip": true,
     "channel_names": ["DAPI", "GFP", "RFP", "FarRed"],
 
     "overlap_fraction": 0.01,
@@ -43,7 +45,8 @@
       "z_range": null,
       "preprocess": { "gain_match": false },
       "norm": { "p_low": 2.0, "p_high": 99.8, "clip": true },
-      "channel_names": null
+      "channel_names": null,
+      "panel_max_dim": 2000
     }
   }
 ]

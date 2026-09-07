@@ -46,9 +46,11 @@ def run_job(job: Dict[str, Any]) -> None:
     placement = str(job.get("placement", "stage")).lower()
 
     only_well = job.get("only_well")
+    only_wells = job.get("only_wells")
     only_grid = job.get("only_grid")
     only_z = job.get("only_z")
     dry_run = bool(job.get("dry_run", False))
+    generate_mip = bool(job.get("generate_mip", True))
     channel_names = job.get("channel_names")
 
     overlap_fraction = float(job.get("overlap_fraction", 0.01))
@@ -115,6 +117,7 @@ def run_job(job: Dict[str, Any]) -> None:
         output_dir=output_dir,
         blend_args=blend_args,
         only_well=only_well,
+        only_wells=only_wells,
         only_grid=only_grid,
         only_z=only_z,
         dry_run=dry_run,
@@ -125,23 +128,26 @@ def run_job(job: Dict[str, Any]) -> None:
         verbose=True,
     )
 
-    # ---- MIP panel PNG (always, if something was stitched and not a dry run) ----
-    if produced and not dry_run:
+    # ---- MIP panel PNG (if something was stitched, not a dry run, and not disabled) ----
+    if produced and not dry_run and generate_mip:
         mip_cfg = dict(job.get("mip", {}))  # optional override block in jobs.json
 
         mip_out = _normalize_mip_out(mip_cfg.get("output_dir"), output_dir)
         os.makedirs(mip_out, exist_ok=True)
 
         # run_mip_job() scans the *entire* stacks_dir, not just what this job just
-        # produced -- so on a repeat run scoped to a different well (only_well set,
-        # e.g. to give each well its own channel_names), an unfiltered MIP step would
-        # re-process every well's files ever stitched into this folder and relabel
-        # them all with *this* run's channel_names. Default include_keywords to the
-        # well token so a scoped run only touches its own well's files, unless the
-        # job already set its own include_keywords explicitly.
+        # produced -- so on a repeat run scoped to one or more wells (only_well/
+        # only_wells set, e.g. to give each well its own channel_names), an
+        # unfiltered MIP step would re-process every well's files ever stitched
+        # into this folder and relabel them all with *this* run's channel_names.
+        # Default include_keywords to the scoped well token(s) so a scoped run
+        # only touches its own well(s)' files, unless the job already set its
+        # own include_keywords explicitly.
         include_keywords = mip_cfg.get("include_keywords")
-        if include_keywords is None and only_well:
-            include_keywords = [str(only_well).replace("/", "_")]
+        if include_keywords is None:
+            wells_for_scope = only_wells if only_wells else ([only_well] if only_well else None)
+            if wells_for_scope:
+                include_keywords = [str(w).replace("/", "_") for w in wells_for_scope]
 
         mip_job = {
             "stacks_dir": output_dir,
@@ -154,6 +160,7 @@ def run_job(job: Dict[str, Any]) -> None:
             "norm": mip_cfg.get("norm", {"p_low": 2.0, "p_high": 99.8, "clip": True}),
             "include_keywords": include_keywords,
             "exclude_keywords": mip_cfg.get("exclude_keywords"),
+            "panel_max_dim": mip_cfg.get("panel_max_dim"),
         }
 
         print(f"\n=== Running MIP panel PNG on {len(produced)} stitched file(s) -> {mip_out} ===")

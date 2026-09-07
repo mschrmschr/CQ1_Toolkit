@@ -71,7 +71,8 @@ def _apply_channel_names(df: pd.DataFrame, channel_names: Optional[List[str]], v
 
 
 def main(meta_csv: str, image_root: str, output_dir: str, *, blend_args: Optional[Dict] = None,
-         only_well: Optional[str] = None, only_grid: Optional[float] = None, dry_run: bool = False,
+         only_well: Optional[str] = None, only_wells: Optional[List[str]] = None,
+         only_grid: Optional[float] = None, dry_run: bool = False,
          stitch_backend: str = "seamless", only_z: Optional[float] = None,
          channel_names: Optional[List[str]] = None, verbose: bool = True) -> List[str]:
     if blend_args is None:
@@ -88,7 +89,10 @@ def main(meta_csv: str, image_root: str, output_dir: str, *, blend_args: Optiona
             return []
 
     pairs = _pairs(df)
-    if only_well is not None:
+    if only_wells:
+        wanted = {str(w) for w in only_wells}
+        pairs = [p for p in pairs if str(p[0]) in wanted]
+    elif only_well is not None:
         pairs = [p for p in pairs if str(p[0]) == str(only_well)]
     if only_grid is not None:
         pairs = [p for p in pairs if float(p[1]) == float(only_grid)]
@@ -121,7 +125,8 @@ def main(meta_csv: str, image_root: str, output_dir: str, *, blend_args: Optiona
 
 
 def run_main(meta_csv: str, image_root: str, output_dir: str, *, blend_args: Optional[Dict] = None,
-             only_well: Optional[str] = None, only_grid: Optional[float] = None, dry_run: bool = False,
+             only_well: Optional[str] = None, only_wells: Optional[List[str]] = None,
+             only_grid: Optional[float] = None, dry_run: bool = False,
              stitch_backend: str = "seamless", only_z: Optional[float] = None, xml_file: Optional[str] = None,
              overlap_fraction: float = 0.01, channel_names: Optional[List[str]] = None,
              verbose: bool = True) -> List[str]:
@@ -135,7 +140,7 @@ def run_main(meta_csv: str, image_root: str, output_dir: str, *, blend_args: Opt
         generate_metadata_csv(xml_file, meta_csv, overlap_fraction=overlap_fraction)
 
     return main(meta_csv, image_root, output_dir, blend_args=blend_args, only_well=only_well,
-                only_grid=only_grid, dry_run=dry_run, stitch_backend=stitch_backend,
+                only_wells=only_wells, only_grid=only_grid, dry_run=dry_run, stitch_backend=stitch_backend,
                 only_z=only_z, channel_names=channel_names, verbose=verbose)
 
 
@@ -178,6 +183,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--channel_names", nargs="*", default=None,
                    help="Override channel names, in C-index order (e.g. --channel_names DAPI GFP RFP).")
     p.add_argument("--only_well", default=None)
+    p.add_argument("--only_wells", nargs="*", default=None)
     p.add_argument("--only_grid", type=float, default=None)
     p.add_argument("--only_z", type=float, default=None)
     p.add_argument("--dry_run", action="store_true")
@@ -210,7 +216,7 @@ def _cli():
         "gain_match_channels": a.gain_match_channels,
     }
     run_main(a.meta_csv, a.image_root, a.output_dir, blend_args=blend_args,
-              only_well=a.only_well, only_grid=a.only_grid, dry_run=a.dry_run,
+              only_well=a.only_well, only_wells=a.only_wells, only_grid=a.only_grid, dry_run=a.dry_run,
               stitch_backend=a.stitch_backend, only_z=a.only_z, channel_names=a.channel_names,
               xml_file=a.xml_file, overlap_fraction=a.overlap_fraction, verbose=not a.quiet)
 

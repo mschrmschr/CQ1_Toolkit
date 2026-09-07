@@ -192,6 +192,14 @@ def _writer_kwargs(compression: Optional[str], compression_level: int, predictor
     if isinstance(comp, str) and comp.lower() in {"none", "null"}:
         comp = None
     compressionargs = {"level": int(compression_level)} if comp is not None else None
+    # TIFF predictor tag: 1 = none, 2 = horizontal differencing. Deliberately
+    # stays at 1 (i.e. "off") even when `predictor=True` is requested: tried
+    # wiring this to the "correct" value 2 and benchmarked it against a real
+    # stitched stack (S:\...\W2_A3_stitched.ome.tif) -- horizontal
+    # differencing made the file ~2.6% *larger*, not smaller, because CQ1
+    # fluorescence data is dominated by photon shot noise rather than smooth
+    # gradients, and differencing amplifies noise instead of exploiting
+    # redundancy. Left as a no-op on purpose; see CQ1_TOOLKIT_LAUNCHER_PLAN.md.
     predictor_value = 1 if (predictor and isinstance(comp, str) and comp.lower() in {"zlib", "zstd"}) else False
 
     kwargs = dict(

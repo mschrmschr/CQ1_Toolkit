@@ -17,6 +17,8 @@
       "enforce_equal_z": true,
       "dtype": "uint16",
       "split_by_w_within_field": true,
+      "only_well": null,
+      "only_wells": null,
       "generate_mip": true
     }
   ]

@@ -198,6 +198,40 @@ def _projection(zcyx: np.ndarray, mode: str = "max") -> np.ndarray:
         raise ValueError("projection must be 'max' or 'mean'")
 
 
+def _block_downsample(arr2d: np.ndarray, factor: int) -> np.ndarray:
+    """Block-average an (Y, X) array down by an integer `factor` per side
+    (trims any remainder rows/cols that don't divide evenly -- a few
+    border pixels lost is irrelevant for a quick-look preview)."""
+    if factor <= 1:
+        return arr2d
+    h, w = arr2d.shape
+    h2, w2 = (h // factor) * factor, (w // factor) * factor
+    arr2d = arr2d[:h2, :w2]
+    arr2d = arr2d.reshape(h2 // factor, factor, w2 // factor, factor)
+    return arr2d.mean(axis=(1, 3))
+
+
+def _downsample_cyx(cyx: np.ndarray, max_dim: int) -> np.ndarray:
+    """Block-average every channel down so neither side exceeds `max_dim`.
+
+    The panel PNG is a quick-look preview only -- never used for
+    measurements, the real data is the stitched OME-TIFF itself (see
+    README's Output section) -- and gets rasterized into a few-hundred-px
+    subplot tile regardless of input resolution. Keeping it at full
+    stitched-mosaic resolution (tens of thousands of px on a wholemount)
+    served no purpose and is what allocated the multi-GiB tinted (Y,X,3)
+    float32 array that OOM'd here -- same class of bug as the stitcher's
+    own full-mosaic allocation (see plan doc 6l/6m), just one step further
+    down the pipeline, in the PNG panel step instead of the stitch/write
+    step.
+    """
+    h, w = cyx.shape[-2:]
+    factor = max(1, int(np.ceil(max(h, w) / max_dim)))
+    if factor == 1:
+        return cyx
+    return np.stack([_block_downsample(cyx[c], factor) for c in range(cyx.shape[0])])
+
+
 def _percentile_normalize(cyx: np.ndarray, p_low: float, p_high: float, clip: bool = True) -> np.ndarray:
     out = np.empty_like(cyx, dtype=np.float32)
     for c in range(cyx.shape[0]):
@@ -309,6 +343,8 @@ def run_mip_job(job: Any) -> Dict[str, Any]:
       - include_keywords / exclude_keywords: Optional[List[str]]
       - channel_colors: Optional[List[str]] (hex, one per channel, for the
         panel PNG; defaults to a built-in palette when not given)
+      - panel_max_dim: Optional[int] (max px per side for the panel PNG's
+        source data before tinting; default 2000 -- see _downsample_cyx)
     """
     stacks_dir = Path(_get(job, "stacks_dir"))
     output_dir = Path(_get(job, "output_dir"))
@@ -320,6 +356,7 @@ def run_mip_job(job: Any) -> Dict[str, Any]:
     projection = (_get(job, "projection") or "max").lower()
     z_range = _get(job, "z_range")
     norm = _get(job, "norm") or {"p_low": 2.0, "p_high": 99.8, "clip": True}
+    panel_max_dim = int(_get(job, "panel_max_dim") or 2000)
 
     include_keywords = _get(job, "include_keywords")
     exclude_keywords = _get(job, "exclude_keywords")
@@ -358,6 +395,7 @@ def run_mip_job(job: Any) -> Dict[str, Any]:
             if channel_names and len(channel_names) == cyx.shape[0]:
                 ch_names = list(channel_names)
 
+            cyx = _downsample_cyx(cyx, panel_max_dim)
             cyx = _percentile_normalize(cyx, norm.get("p_low", 2.0), norm.get("p_high", 99.8), norm.get("clip", True))
 
             if preprocess.get("gain_match"):
